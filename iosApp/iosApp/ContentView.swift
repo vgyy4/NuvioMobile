@@ -359,6 +359,7 @@ enum NuvioAppTab: String, CaseIterable, Hashable {
     }
 }
 
+@available(iOS 16.0, *)
 private enum NuvioNativeTabIcon {
     private static let legacyStaticIconSize = CGSize(width: 25, height: 25)
 
