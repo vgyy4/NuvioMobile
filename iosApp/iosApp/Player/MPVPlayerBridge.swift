@@ -365,7 +365,9 @@ final class MPVPlayerViewController: UIViewController {
         metalLayer.contentsScale = view.window?.screen.nativeScale ?? UIScreen.main.nativeScale
         metalLayer.framebufferOnly = true
         metalLayer.backgroundColor = UIColor.black.cgColor
-        metalLayer.wantsExtendedDynamicRangeContent = true
+        if #available(iOS 16.0, *) {
+            metalLayer.wantsExtendedDynamicRangeContent = true
+        }
         metalLayer.anchorPoint = CGPoint(x: 0, y: 0)
         metalLayer.position = .zero
         let pip = PlayerPictureInPictureController(owner: self, metalLayer: metalLayer)
@@ -526,6 +528,37 @@ final class MPVPlayerViewController: UIViewController {
         }
     }
 
+    // MARK: - Low-memory device profile
+
+    /// Devices with roughly 2 GB of RAM or less (iPad Air 2, iPad 5th gen, iPhone 6s/7/8 ...).
+    /// mpv's defaults (150 MiB forward + 150 MiB back demuxer cache, compute-shader HDR peak
+    /// detection, polyphase scalers) are tuned for desktops and risk jetsam kills or dropped
+    /// frames on these devices.
+    static let isLowMemoryDevice: Bool =
+        ProcessInfo.processInfo.physicalMemory <= 2_684_354_560 // 2.5 GiB
+
+    private func applyLowMemoryDeviceProfile() {
+        guard Self.isLowMemoryDevice else { return }
+        // Bound the demuxer cache.
+        checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "48MiB"))
+        checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "16MiB"))
+        // Cheap scalers, no dithering / sigmoid / correct-downscaling passes.
+        checkError(mpv_set_option_string(mpv, "scale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "cscale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "dscale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "correct-downscaling", "no"))
+        checkError(mpv_set_option_string(mpv, "sigmoid-upscaling", "no"))
+        checkError(mpv_set_option_string(mpv, "dither-depth", "no"))
+        // Peak detection needs compute shaders and extra GPU memory; the panel is SDR anyway.
+        checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "no"))
+        // Lighter software decode path for codecs the A8-class hardware cannot decode (HEVC).
+        checkError(mpv_set_option_string(mpv, "vd-lavc-fast", "yes"))
+        checkError(mpv_set_option_string(mpv, "vd-lavc-skiploopfilter", "nonref"))
+        // Drop late frames instead of stalling audio.
+        checkError(mpv_set_option_string(mpv, "video-sync", "audio"))
+        checkError(mpv_set_option_string(mpv, "framedrop", "vo"))
+    }
+
     // MARK: - MPV Setup
 
     private func setupMpv() {
@@ -562,6 +595,7 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "auto"))
         checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "yes"))
+        applyLowMemoryDeviceProfile()
 
         checkError(mpv_initialize(mpv))
         applyAudioLanguagePreferences(preferredAudioLanguages)
@@ -786,17 +820,20 @@ final class MPVPlayerViewController: UIViewController {
         saturation: Int,
         gamma: Int
     ) {
-        metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+        if #available(iOS 16.0, *) {
+            metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+        }
         guard mpv != nil else { return }
 
         setStringProperty("hwdec", hardwareDecoder)
         setStringProperty("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
         setStringProperty("tone-mapping", toneMapping)
-        setStringProperty("hdr-compute-peak", hdrComputePeak ? "yes" : "no")
+        let isLowMemory = Self.isLowMemoryDevice
+        setStringProperty("hdr-compute-peak", hdrComputePeak && !isLowMemory ? "yes" : "no")
         setStringProperty("target-prim", targetPrimaries)
         setStringProperty("target-trc", targetTransfer)
-        setStringProperty("deband", deband ? "yes" : "no")
-        setStringProperty("interpolation", interpolation ? "yes" : "no")
+        setStringProperty("deband", deband && !isLowMemory ? "yes" : "no")
+        setStringProperty("interpolation", interpolation && !isLowMemory ? "yes" : "no")
         setVideoEqualizer("brightness", brightness)
         setVideoEqualizer("contrast", contrast)
         setVideoEqualizer("saturation", saturation)

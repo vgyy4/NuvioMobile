@@ -1495,7 +1495,7 @@ struct ContentView: View {
                     .allowsHitTesting(systemUI.pictureInPictureMessage == nil)
             }
         }
-        .persistentSystemOverlays(systemUI.isPlayerImmersive ? .hidden : .automatic)
+        .hidesPersistentSystemOverlaysIfAvailable(systemUI.isPlayerImmersive)
         .statusBarHidden(systemUI.isPlayerImmersive)
         .overlay {
             if let message = systemUI.pictureInPictureMessage {
@@ -1526,6 +1526,19 @@ struct ContentView: View {
                     NotificationCenter.default.post(name: playerSceneDidActivateNotification, object: nil)
                 }
             }
+        }
+    }
+}
+
+private extension View {
+    /// `persistentSystemOverlays` (home indicator auto-hide) is iOS 16+. On iOS 15 the
+    /// UIKit `prefersHomeIndicatorAutoHidden` path driven by `SystemUI` already covers it.
+    @ViewBuilder
+    func hidesPersistentSystemOverlaysIfAvailable(_ hidden: Bool) -> some View {
+        if #available(iOS 16.0, *) {
+            self.persistentSystemOverlays(hidden ? .hidden : .automatic)
+        } else {
+            self
         }
     }
 }
