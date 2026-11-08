@@ -25,6 +25,7 @@ jobs:
       NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
       NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
       NUVIO_ENGINE_ROOT: ${{ github.workspace }}/nuvio-engine
+      RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
 
     steps:
       - name: Check out NuvioMobile
@@ -96,6 +97,19 @@ jobs:
           key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/gradle/libs.versions.toml') }}
           restore-keys: |
             konan-${{ runner.os }}-${{ runner.arch }}-
+
+      # Gradle requires local.properties to exist. Upstream supplies it from a
+      # secret; without one the file is empty and all runtime keys (Supabase,
+      # TMDB, Sentry) default to blank.
+      - name: Configure runtime properties
+        working-directory: NuvioMobile
+        run: |
+          if [[ -n "${RELEASE_PROPERTIES_BASE64}" ]]; then
+            printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
+            sed -i '' -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          else
+            : > local.properties
+          fi
 
       - name: Prepare iOS dependencies
         working-directory: NuvioMobile
