@@ -1,0 +1,125 @@
+name: iOS 15 Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci-ios-build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios15-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned iOS 15 IPA
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+      IOS_CONFIGURATION: Release
+      KOTLIN_DAEMON_JVMARGS: -Xmx2048M
+      NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
+      NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
+      NUVIO_ENGINE_ROOT: ${{ github.workspace }}/nuvio-engine
+
+    steps:
+      - name: Check out NuvioMobile
+        uses: actions/checkout@v4
+        with:
+          path: NuvioMobile
+          submodules: recursive
+
+      - name: Check out nuvio-engine
+        uses: actions/checkout@v4
+        with:
+          repository: vgyy4/nuvio-engine
+          ref: ios15-deployment-target
+          path: nuvio-engine
+
+      - name: Select newest Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          xcodebuild -version
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "Selecting ${newest}"
+          sudo xcode-select -s "${newest}/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja
+          perl -MText::Template -e 1 || sudo cpan -T Text::Template
+
+      - name: Build NuvioEngine.xcframework (iOS 15.0)
+        working-directory: nuvio-engine
+        run: |
+          set -o pipefail
+          NUVIO_BUILD_JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-apple-xcframework.sh
+          ./scripts/verify-apple-xcframework.sh
+          ./scripts/smoke-apple-xcframework.sh
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: NuvioMobile
+
+      - name: Cache Kotlin Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/gradle/libs.versions.toml') }}
+          restore-keys: |
+            konan-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare iOS dependencies
+        working-directory: NuvioMobile
+        run: ./scripts/prepare-ios-dependencies.sh
+
+      - name: Build unsigned IPA
+        working-directory: NuvioMobile
+        run: |
+          set -o pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/logs"
+          ./scripts/build-ios-ipa.sh 2>&1 | tee "${GITHUB_WORKSPACE}/logs/build-ios-ipa.log"
+
+      - name: Verify MinimumOSVersion is 15.0
+        working-directory: NuvioMobile
+        run: |
+          app_path="$(find build -type d -name Nuvio.app -path '*-iphoneos/*' -print -quit)"
+          test -n "${app_path}" || { echo "Nuvio.app not found" >&2; exit 1; }
+          minimum="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "${app_path}/Info.plist")"
+          echo "MinimumOSVersion=${minimum}"
+          echo "MinimumOSVersion: ${minimum}" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${minimum}" != "15.0" ]]; then
+            echo "Expected MinimumOSVersion 15.0 but found ${minimum}" >&2
+            exit 1
+          fi
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-ios15-unsigned-ipa
+          path: NuvioMobile/build/ios-ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios15-build-logs
+          path: |
+            logs/
+            nuvio-engine/platform/apple/build/*/*.log
+          if-no-files-found: warn
