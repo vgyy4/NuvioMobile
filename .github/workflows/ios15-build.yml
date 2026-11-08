@@ -31,7 +31,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: NuvioMobile
-          submodules: recursive
+
+      # `submodules: recursive` fails upstream: the tree has an orphan
+      # `libass-android` gitlink with no .gitmodules entry (Android-only).
+      # iOS only needs MPVKit, so initialise that one recursively.
+      - name: Initialise MPVKit submodule
+        working-directory: NuvioMobile
+        run: git submodule update --init --recursive MPVKit
 
       - name: Check out nuvio-engine
         uses: actions/checkout@v4
