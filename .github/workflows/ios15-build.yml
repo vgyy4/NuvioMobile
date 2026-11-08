@@ -58,7 +58,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install cmake ninja
+          brew install cmake ninja ripgrep
           perl -MText::Template -e 1 || sudo cpan -T Text::Template
 
       - name: Build NuvioEngine.xcframework (iOS 15.0)
