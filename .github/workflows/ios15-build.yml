@@ -115,10 +115,15 @@ jobs:
         working-directory: NuvioMobile
         run: ./scripts/prepare-ios-dependencies.sh
 
+      # The hosted runners' newest SDK predates the iOS 27.1 APIs used behind
+      # `#available(iOS 27.1, *)`, so exclude that code from this build.
       - name: Build unsigned IPA
         working-directory: NuvioMobile
         run: |
           set -o pipefail
+          printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) NUVIO_NO_IOS27_SDK
+' > "${RUNNER_TEMP}/ci.xcconfig"
+          export XCODE_XCCONFIG_FILE="${RUNNER_TEMP}/ci.xcconfig"
           mkdir -p "${GITHUB_WORKSPACE}/logs"
           ./scripts/build-ios-ipa.sh 2>&1 | tee "${GITHUB_WORKSPACE}/logs/build-ios-ipa.log"
 
