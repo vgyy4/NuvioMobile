@@ -121,8 +121,7 @@ jobs:
         working-directory: NuvioMobile
         run: |
           set -o pipefail
-          printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) NUVIO_NO_IOS27_SDK
-' > "${RUNNER_TEMP}/ci.xcconfig"
+          echo 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) NUVIO_NO_IOS27_SDK' > "${RUNNER_TEMP}/ci.xcconfig"
           export XCODE_XCCONFIG_FILE="${RUNNER_TEMP}/ci.xcconfig"
           mkdir -p "${GITHUB_WORKSPACE}/logs"
           ./scripts/build-ios-ipa.sh 2>&1 | tee "${GITHUB_WORKSPACE}/logs/build-ios-ipa.log"
