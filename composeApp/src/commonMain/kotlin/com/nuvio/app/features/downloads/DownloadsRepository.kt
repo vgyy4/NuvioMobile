@@ -885,7 +885,7 @@ private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
 private const val ORPHAN_SWEEP_DELAY_MS = 20_000L
 private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
 // Computing the video hash reads a few blocks of the file; the subtitle lookup goes on without it.
-private const val SUBTITLE_HASH_TIMEOUT_MS = 8_000L
+private const val SUBTITLE_HASH_TIMEOUT_MS = 3_000L
 private const val MAX_PREVIEWED_SUBTITLES = 8
 
 private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
