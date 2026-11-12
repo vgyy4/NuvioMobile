@@ -44,10 +44,16 @@ object DownloadsRepository {
     private val _uiState = MutableStateFlow(DownloadsUiState())
     val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
 
-    // Subtitle languages the user unticked in the download options. Remembering the unticked ones
-    // (instead of the ticked ones) keeps "everything ticked" the default for languages not seen yet.
-    private val _deselectedSubtitleLanguages = MutableStateFlow<Set<String>>(emptySet())
-    val deselectedSubtitleLanguages: StateFlow<Set<String>> = _deselectedSubtitleLanguages.asStateFlow()
+    // Subtitle languages (normalized codes) the user had ticked in the download options last time.
+    // null = nothing saved yet: every language is ticked by default. Once a choice is saved, a
+    // language is ticked only if it is in this set, so languages never offered before start unticked.
+    private val _selectedSubtitleLanguages = MutableStateFlow<Set<String>?>(null)
+    val selectedSubtitleLanguages: StateFlow<Set<String>?> = _selectedSubtitleLanguages.asStateFlow()
+
+    // Fallback for data written by older app versions, which remembered the UNticked languages.
+    // Only read while no selection is saved; kept unchanged in the local payload until the user
+    // saves a new selection (then it is cleared) and never written to the cloud.
+    private var legacyDeselectedSubtitleLanguages: Set<String> = emptySet()
 
     // Whether the home screen turns into the downloads view while the device is offline.
     private val _offlineDownloadsHome = MutableStateFlow(true)
@@ -84,7 +90,8 @@ object DownloadsRepository {
         activeHandles.clear()
         hasLoaded = false
         _hasUnseenCompleted.value = false
-        _deselectedSubtitleLanguages.value = emptySet()
+        _selectedSubtitleLanguages.value = null
+        legacyDeselectedSubtitleLanguages = emptySet()
         _offlineDownloadsHome.value = true
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
@@ -103,22 +110,59 @@ object DownloadsRepository {
         downloadIds.toList().forEach(::cancelDownload)
     }
 
-    /** Remembers the choice made in the download options: offered but unticked languages. */
+    /**
+     * The languages to tick when the download options open, out of the [available] ones.
+     * - A saved selection exists: exactly the available languages that are in it (languages never
+     *   offered before are NOT ticked).
+     * - Only the legacy "unticked" list exists (older app version): everything except those.
+     * - Nothing saved: everything.
+     */
+    fun initialSubtitleSelection(available: List<String>): Set<String> {
+        ensureLoaded()
+        val saved = _selectedSubtitleLanguages.value
+        return when {
+            saved != null -> available.filterTo(mutableSetOf<String>()) { it in saved }
+            legacyDeselectedSubtitleLanguages.isNotEmpty() -> {
+                val deselected = legacyDeselectedSubtitleLanguages.mapTo(mutableSetOf<String>()) { canonicalSubtitleLanguage(it) }
+                available.filterTo(mutableSetOf<String>()) { it !in deselected }
+            }
+            else -> available.toSet()
+        }
+    }
+
+    /**
+     * Remembers the choice made in the download options: the ticked languages. Languages that were
+     * not offered this time keep their saved state.
+     */
     fun rememberSubtitleSelection(offered: List<String>, ticked: List<String>) {
         ensureLoaded()
-        val updated = (_deselectedSubtitleLanguages.value - offered.toSet()) + (offered.toSet() - ticked.toSet())
-        if (updated == _deselectedSubtitleLanguages.value) return
-        _deselectedSubtitleLanguages.value = updated
+        val previous = _selectedSubtitleLanguages.value.orEmpty()
+        val updated = (previous - offered.toSet()) + ticked.map { canonicalSubtitleLanguage(it) }
+        if (updated == _selectedSubtitleLanguages.value) return
+        _selectedSubtitleLanguages.value = updated
+        legacyDeselectedSubtitleLanguages = emptySet()
         persist()
     }
 
-    /** Applies the choice synced from the cloud for this profile. */
-    fun replaceDeselectedSubtitleLanguages(languages: Collection<String>) {
+    /**
+     * Applies the choice synced from the cloud for this profile. [languages] is the saved
+     * selection; [legacyDeselected] is what older app versions synced (unticked languages), used
+     * only when [languages] is absent and nothing is saved locally.
+     */
+    fun replaceSelectedSubtitleLanguages(languages: Collection<String>?, legacyDeselected: Collection<String>?) {
         ensureLoaded()
-        val updated = languages.toSet()
-        if (updated == _deselectedSubtitleLanguages.value) return
-        _deselectedSubtitleLanguages.value = updated
-        persist()
+        if (languages != null) {
+            val updated = languages.mapTo(mutableSetOf<String>()) { canonicalSubtitleLanguage(it) }
+            if (updated == _selectedSubtitleLanguages.value) return
+            _selectedSubtitleLanguages.value = updated
+            legacyDeselectedSubtitleLanguages = emptySet()
+            persist()
+        } else if (legacyDeselected != null && _selectedSubtitleLanguages.value == null) {
+            val updated = legacyDeselected.toSet()
+            if (updated == legacyDeselectedSubtitleLanguages) return
+            legacyDeselectedSubtitleLanguages = updated
+            persist()
+        }
     }
 
     /**
@@ -445,13 +489,15 @@ object DownloadsRepository {
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
-            _deselectedSubtitleLanguages.value = emptySet()
+            _selectedSubtitleLanguages.value = null
+            legacyDeselectedSubtitleLanguages = emptySet()
             _offlineDownloadsHome.value = true
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
-        _deselectedSubtitleLanguages.value = DownloadsCodec.decodeDeselectedLanguages(payload)
+        _selectedSubtitleLanguages.value = DownloadsCodec.decodeSelectedLanguages(payload)
+        legacyDeselectedSubtitleLanguages = DownloadsCodec.decodeDeselectedLanguages(payload)
         _offlineDownloadsHome.value = DownloadsCodec.decodeOfflineDownloadsHome(payload)
 
         var shouldPersistNormalized = false
@@ -774,7 +820,8 @@ object DownloadsRepository {
         DownloadsStorage.savePayload(
             DownloadsCodec.encode(
                 _uiState.value.items,
-                _deselectedSubtitleLanguages.value,
+                _selectedSubtitleLanguages.value,
+                legacyDeselectedSubtitleLanguages,
                 _offlineDownloadsHome.value,
             ),
         )
@@ -840,7 +887,10 @@ private sealed interface P2pDownloadOutcome {
 @Serializable
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
+    // Legacy (older app versions): the UNticked languages. Only read as a fallback.
     val deselectedSubtitleLanguages: List<String> = emptyList(),
+    // The ticked languages; null = never saved.
+    val subtitleLanguages: List<String>? = null,
     val offlineDownloadsHome: Boolean = true,
 )
 
@@ -860,6 +910,11 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).deselectedSubtitleLanguages.toSet()
         }.getOrDefault(emptySet())
 
+    fun decodeSelectedLanguages(payload: String): Set<String>? =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).subtitleLanguages?.toSet()
+        }.getOrNull()
+
     fun decodeOfflineDownloadsHome(payload: String): Boolean =
         runCatching {
             json.decodeFromString<StoredDownloadsPayload>(payload).offlineDownloadsHome
@@ -867,17 +922,22 @@ private object DownloadsCodec {
 
     fun encode(
         items: Collection<DownloadItem>,
-        deselectedSubtitleLanguages: Set<String>,
+        selectedSubtitleLanguages: Set<String>?,
+        legacyDeselectedSubtitleLanguages: Set<String>,
         offlineDownloadsHome: Boolean,
     ): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
-                deselectedSubtitleLanguages = deselectedSubtitleLanguages.toList().sorted(),
+                deselectedSubtitleLanguages = legacyDeselectedSubtitleLanguages.toList().sorted(),
+                subtitleLanguages = selectedSubtitleLanguages?.toList()?.sorted(),
                 offlineDownloadsHome = offlineDownloadsHome,
             ),
         )
 }
+
+/** Saved languages are compared by normalized code, so different spellings of one language match. */
+private fun canonicalSubtitleLanguage(language: String): String = normalizeLanguageCode(language) ?: language
 
 private fun sanitizeRequestHeaders(headers: Map<String, String>?): Map<String, String> =
     headers
