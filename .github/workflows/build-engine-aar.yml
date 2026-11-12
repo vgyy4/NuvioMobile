@@ -1,0 +1,72 @@
+name: Build Android engine AAR
+
+# Builds the Android Nuvio Engine library from source (vgyy4/nuvio-engine) and commits it to the
+# branch that was dispatched, replacing the prebuilt composeApp/libs/lib-nuvio-engine-android-*.aar.
+on:
+  workflow_dispatch:
+    inputs:
+      engine_ref:
+        description: nuvio-engine branch or tag to build
+        default: ccr-perf-9ba47f5b
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-engine-aar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build engine AAR
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+
+      - name: Checkout nuvio-engine
+        uses: actions/checkout@v4
+        with:
+          repository: vgyy4/nuvio-engine
+          ref: ${{ inputs.engine_ref }}
+          path: nuvio-engine
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+
+      - name: Install NDK and CMake
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865" "cmake;4.1.2" "platforms;android-36"
+
+      - name: Build release AAR
+        working-directory: nuvio-engine/platform/android
+        run: ./gradlew :engine:assembleRelease --stacktrace
+
+      - name: Replace the AAR in the app
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -nE 's/^version = "([^"]+)".*/\1/p' nuvio-engine/platform/android/engine/build.gradle.kts | head -n1)
+          SRC=$(ls nuvio-engine/platform/android/engine/build/outputs/aar/*release*.aar | head -n1)
+          echo "engine version ${VERSION}, built ${SRC}"
+          git rm -q --ignore-unmatch composeApp/libs/lib-nuvio-engine-android-*.aar
+          cp "$SRC" "composeApp/libs/lib-nuvio-engine-android-${VERSION}.aar"
+          ls -l composeApp/libs/
+
+      - name: Commit the AAR
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add composeApp/libs
+          git commit -m "build: Android engine AAR built from nuvio-engine ${{ inputs.engine_ref }}" || exit 0
+          git push origin "HEAD:${GITHUB_REF_NAME}"
