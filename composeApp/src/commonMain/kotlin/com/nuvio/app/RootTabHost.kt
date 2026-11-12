@@ -92,13 +92,14 @@ private fun RootTabPane(
     // Short fade-in of the incoming page only (triggered by tab selection, not by the host going
     // inactive/active for overlays or backgrounding). Inactive panes are not measured or drawn, so no
     // second page is drawn during the fade; alpha is read in the layer (draw) phase, not in composition.
-    val fade = remember { Animatable(if (fadeInOnFirstShow && selected) 0f else 1f) }
+    // iOS only: Android's tab switch is unchanged.
+    val fade = remember { Animatable(if (isIos && fadeInOnFirstShow && selected) 0f else 1f) }
     val fadeScope = rememberCoroutineScope()
     val wasSelected = remember { TabPaneSelection(selected && !fadeInOnFirstShow) }
     SideEffect {
         if (selected && !wasSelected.value) {
             wasSelected.value = true
-            fadeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            if (isIos) fadeScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 fade.snapTo(0f)
                 fade.animateTo(1f, tween(durationMillis = 120, easing = LinearOutSlowInEasing))
             }
