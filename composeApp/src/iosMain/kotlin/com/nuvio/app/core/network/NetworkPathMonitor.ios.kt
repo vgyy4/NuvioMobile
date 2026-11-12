@@ -1,27 +1,23 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
-
 package com.nuvio.app.core.network
 
-import platform.Network.nw_path_get_status
-import platform.Network.nw_path_monitor_create
-import platform.Network.nw_path_monitor_set_queue
-import platform.Network.nw_path_monitor_set_update_handler
-import platform.Network.nw_path_monitor_start
-import platform.Network.nw_path_status_satisfied
-import platform.darwin.dispatch_queue_create
+private var listener: ((Boolean) -> Unit)? = null
+private var lastReported: Boolean? = null
+
+/**
+ * Called from Swift (`NetworkPathBridge`) with the system's connectivity state. The Swift side
+ * starts at app launch, before the shared code asks for updates, so the latest state is kept and
+ * handed over when [NetworkPathMonitor.start] is called.
+ */
+fun reportNativeNetworkPath(connected: Boolean) {
+    lastReported = connected
+    listener?.invoke(connected)
+}
 
 internal actual object NetworkPathMonitor {
-    // Kept so the system object stays alive for as long as the app runs.
-    private var monitor: Any? = null
-
-    actual fun start(onChange: (connected: Boolean) -> Unit) {
-        if (monitor != null) return
-        val created = nw_path_monitor_create()
-        monitor = created
-        nw_path_monitor_set_queue(created, dispatch_queue_create("com.nuvio.app.network-path", null))
-        nw_path_monitor_set_update_handler(created) { path ->
-            onChange(path != null && nw_path_get_status(path) == nw_path_status_satisfied)
-        }
-        nw_path_monitor_start(created)
+    actual fun start(onChange: (connected: Boolean) -> Unit): Boolean {
+        listener = onChange
+        lastReported?.let(onChange)
+        // If the Swift side never reports, the repository's watchdog switches to the fallback.
+        return true
     }
 }

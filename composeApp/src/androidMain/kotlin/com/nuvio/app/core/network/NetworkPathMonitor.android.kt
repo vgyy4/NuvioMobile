@@ -13,10 +13,9 @@ internal actual object NetworkPathMonitor {
         appContext = context.applicationContext
     }
 
-    actual fun start(onChange: (connected: Boolean) -> Unit) {
-        if (started) return
-        val manager = appContext?.getSystemService(ConnectivityManager::class.java) ?: return
-        started = true
+    actual fun start(onChange: (connected: Boolean) -> Unit): Boolean {
+        if (started) return true
+        val manager = appContext?.getSystemService(ConnectivityManager::class.java) ?: return false
 
         // Asking the system what is active now (instead of trusting the order of the events)
         // keeps a switch from Wi-Fi to mobile data from looking like a loss of connection.
@@ -26,12 +25,19 @@ internal actual object NetworkPathMonitor {
                 ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         }
 
-        onChange(hasConnection())
-        manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = onChange(hasConnection())
-            override fun onLost(network: Network) = onChange(hasConnection())
-            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
-                onChange(hasConnection())
-        })
+        return try {
+            manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = onChange(hasConnection())
+                override fun onLost(network: Network) = onChange(hasConnection())
+                override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+                    onChange(hasConnection())
+            })
+            started = true
+            onChange(hasConnection())
+            true
+        } catch (_: Exception) {
+            // Some devices refuse the registration (for example when the limit of callbacks is hit).
+            false
+        }
     }
 }

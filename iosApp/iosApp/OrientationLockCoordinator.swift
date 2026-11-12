@@ -1,9 +1,27 @@
 import UIKit
+import Network
 import UserNotifications
 import ComposeApp
 
 private let lockPlayerToLandscapeNotification = Notification.Name("NuvioPlayerLockLandscape")
 private let unlockPlayerOrientationNotification = Notification.Name("NuvioPlayerUnlockOrientation")
+
+/// Reports connectivity changes from the system to the shared code. The system calls this when
+/// the connection comes or goes, so nothing polls.
+final class NetworkPathBridge {
+    static let shared = NetworkPathBridge()
+    private let monitor = NWPathMonitor()
+    private var started = false
+
+    func start() {
+        guard !started else { return }
+        started = true
+        monitor.pathUpdateHandler = { path in
+            NetworkPathMonitor_iosKt.reportNativeNetworkPath(connected: path.status == .satisfied)
+        }
+        monitor.start(queue: DispatchQueue(label: "com.nuvio.app.network-path"))
+    }
+}
 
 final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(
@@ -11,6 +29,7 @@ final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserN
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         OrientationLockCoordinator.shared.start()
+        NetworkPathBridge.shared.start()
         DownloadsLiveActivityManager.shared.start()
         UNUserNotificationCenter.current().delegate = self
         return true
