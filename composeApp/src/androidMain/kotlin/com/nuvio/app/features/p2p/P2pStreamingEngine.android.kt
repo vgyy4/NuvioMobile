@@ -175,6 +175,9 @@ actual object P2pStreamingEngine {
                         torrentId = torrentId,
                         fileIndex = request.fileIdx,
                         filenameHint = request.filename,
+                        // TODO: once the Android engine library is rebuilt from the engine source (0.1.7+, see
+                        // nuvio-engine PR #3), pass `mode = NuvioStreamMode.DOWNLOAD` here so saved bytes are
+                        // hash-verified only and downloads yield to playback.
                     )
                     preparedStream = stream
                     currentCoroutineContext().ensureActive()
