@@ -5,7 +5,6 @@ import com.nuvio.app.features.streams.StreamSubtitle
 import kotlinx.serialization.Serializable
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.downloads_enqueue_missing_url
-import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_busy
 import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_disabled
 import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_unsupported
 import nuvio.composeapp.generated.resources.downloads_enqueue_replaced
@@ -104,8 +103,7 @@ enum class DownloadEnqueueResult {
     MissingUrl,
     UnsupportedFormat,
     P2pUnsupported,
-    P2pDisabled,
-    P2pBusy;
+    P2pDisabled;
 
     suspend fun toastMessage(): String = when (this) {
         Started -> getString(Res.string.downloads_enqueue_started)
@@ -114,7 +112,6 @@ enum class DownloadEnqueueResult {
         UnsupportedFormat -> getString(Res.string.downloads_enqueue_unsupported_format)
         P2pUnsupported -> getString(Res.string.downloads_enqueue_p2p_unsupported)
         P2pDisabled -> getString(Res.string.downloads_enqueue_p2p_disabled)
-        P2pBusy -> getString(Res.string.downloads_enqueue_p2p_busy)
     }
 }
 

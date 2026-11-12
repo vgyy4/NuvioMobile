@@ -50,6 +50,7 @@ private const val DOWNLOAD_REQUEST_TIMEOUT_SECONDS = 60.0
 private const val DOWNLOAD_RESOURCE_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 private const val PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 private const val PROGRESS_MIN_BYTE_DELTA = 512L * 1024L
+private const val ORPHAN_MIN_AGE_SECONDS = 120.0
 
 private val backgroundSessionCompletionHandlers = mutableMapOf<String, () -> Unit>()
 
@@ -186,6 +187,25 @@ internal actual object DownloadsPlatformDownloader {
         } else {
             null
         }
+    }
+
+    actual fun removeOrphanedPartialFiles(knownFileNames: Set<String>) {
+        val manager = NSFileManager.defaultManager
+        val directory = downloadsDirectoryPath()
+        val names = manager.contentsOfDirectoryAtPath(directory, error = null)
+            ?.filterIsInstance<String>()
+            ?: return
+        val now = NSDate().timeIntervalSince1970
+        names
+            .filter { it.endsWith(".part") && it.removeSuffix(".part") !in knownFileNames }
+            .forEach { name ->
+                val path = "$directory/$name"
+                val modified = (manager.attributesOfItemAtPath(path, error = null)
+                    ?.get("NSFileModificationDate") as? NSDate)
+                    ?.timeIntervalSince1970
+                    ?: return@forEach
+                if (now - modified > ORPHAN_MIN_AGE_SECONDS) removePathIfExists(path)
+            }
     }
 
     actual fun openDownloadsDirectory(): Boolean {

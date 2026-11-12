@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -77,6 +78,7 @@ import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.NuvioToastHost
 import com.nuvio.app.core.ui.PosterZoomAnchor
+import com.nuvio.app.core.ui.DevicePerformance
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
 import com.nuvio.app.core.ui.PosterZoomOverlayExitAnimation
@@ -959,6 +961,7 @@ internal fun MainAppContent(
             resumeProgressFraction: Float?,
             manualSelection: Boolean,
             startFromBeginning: Boolean,
+            downloadOnly: Boolean = false,
         ) {
             val targetResumePositionMs = if (startFromBeginning) 0L else (resumePositionMs ?: 0L)
             val targetResumeProgressFraction = if (startFromBeginning) null else resumeProgressFraction
@@ -1031,8 +1034,9 @@ internal fun MainAppContent(
                     pauseDescription = pauseDescription,
                     resumePositionMs = if (startFromBeginning) 0L else resumePositionMs,
                     resumeProgressFraction = targetResumeProgressFraction,
-                    manualSelection = manualSelection,
+                    manualSelection = manualSelection || downloadOnly,
                     startFromBeginning = startFromBeginning,
+                    downloadOnly = downloadOnly,
                 ),
             )
             navController.navigate(
@@ -1109,6 +1113,30 @@ internal fun MainAppContent(
                     resumeProgressFraction = null,
                     manualSelection = true,
                     startFromBeginning = false,
+                )
+            }
+
+        val onDownloadSource: ContentPlayAction =
+            { type, videoId, parentMetaId, parentMetaType, title, logo, poster, background, seasonNumber, episodeNumber, episodeTitle, episodeThumbnail, pauseDescription, resumePositionMs ->
+                launchPlaybackWithDownloadPreference(
+                    type = type,
+                    videoId = videoId,
+                    parentMetaId = parentMetaId,
+                    parentMetaType = parentMetaType,
+                    title = title,
+                    logo = logo,
+                    poster = poster,
+                    background = background,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    episodeTitle = episodeTitle,
+                    episodeThumbnail = episodeThumbnail,
+                    pauseDescription = pauseDescription,
+                    resumePositionMs = resumePositionMs,
+                    resumeProgressFraction = null,
+                    manualSelection = true,
+                    startFromBeginning = false,
+                    downloadOnly = true,
                 )
             }
 
@@ -1280,6 +1308,29 @@ internal fun MainAppContent(
             openContinueWatching(item, true, false)
         }
 
+        val onContinueWatchingDownload: (ContinueWatchingItem) -> Unit = { item ->
+            launchPlaybackWithDownloadPreference(
+                type = item.parentMetaType,
+                videoId = item.videoId,
+                parentMetaId = item.parentMetaId,
+                parentMetaType = item.parentMetaType,
+                title = item.title,
+                logo = item.logo,
+                poster = item.poster,
+                background = item.background,
+                seasonNumber = item.seasonNumber,
+                episodeNumber = item.episodeNumber,
+                episodeTitle = item.episodeTitle,
+                episodeThumbnail = item.episodeThumbnail,
+                pauseDescription = item.pauseDescription,
+                resumePositionMs = null,
+                resumeProgressFraction = null,
+                manualSelection = true,
+                startFromBeginning = false,
+                downloadOnly = true,
+            )
+        }
+
         val onContinueWatchingRemove: (ContinueWatchingItem) -> Unit = { item ->
             continueWatchingDisintegrationRequests.arm(continueWatchingItemKey(item))
             if (item.isNextUp) {
@@ -1320,7 +1371,9 @@ internal fun MainAppContent(
                 modifier = Modifier
                     .fillMaxSize()
                     .then(
-                        if (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null) {
+                        if (!DevicePerformance.isLowEnd &&
+                            (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null)
+                        ) {
                             Modifier.hazeSource(state = posterOverlayHazeState)
                         } else {
                             Modifier
@@ -1546,6 +1599,7 @@ internal fun MainAppContent(
                         navController = navController,
                         onPlay = onPlay,
                         onPlayManually = onPlayManually,
+                        onDownloadSource = onDownloadSource,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = LocalNavAnimatedContentScope.current,
                     )
@@ -1761,7 +1815,7 @@ internal fun MainAppContent(
                             },
                         isWatched = isWatched,
                         anchor = selectedPosterAnchor,
-                        actions = listOf(
+                        actions = listOfNotNull(
                             PosterZoomOverlayAction(
                                 icon = if (isSaved) Icons.Default.DeleteOutline else Icons.Default.Add,
                                 label = if (isSaved) {
@@ -1892,6 +1946,40 @@ internal fun MainAppContent(
                                     }
                                 },
                             ),
+                            if (
+                                preview.type.equals("movie", ignoreCase = true) &&
+                                !preview.id.startsWith("tmdb:") &&
+                                playbackAvailability.canStream(preview.type, preview.id)
+                            ) {
+                                PosterZoomOverlayAction(
+                                    icon = Icons.Rounded.Download,
+                                    label = stringResource(Res.string.download_action_label),
+                                    onSelected = {
+                                        launchPlaybackWithDownloadPreference(
+                                            type = preview.type,
+                                            videoId = preview.id,
+                                            parentMetaId = preview.id,
+                                            parentMetaType = preview.type,
+                                            title = preview.name,
+                                            logo = preview.logo,
+                                            poster = preview.poster,
+                                            background = preview.banner,
+                                            seasonNumber = null,
+                                            episodeNumber = null,
+                                            episodeTitle = null,
+                                            episodeThumbnail = null,
+                                            pauseDescription = null,
+                                            resumePositionMs = null,
+                                            resumeProgressFraction = null,
+                                            manualSelection = true,
+                                            startFromBeginning = false,
+                                            downloadOnly = true,
+                                        )
+                                    },
+                                )
+                            } else {
+                                null
+                            },
                         ),
                         hazeState = posterOverlayHazeState,
                         onDismissed = {
@@ -1942,6 +2030,15 @@ internal fun MainAppContent(
                                             icon = Icons.Default.PlayArrow,
                                             label = stringResource(Res.string.play_manually),
                                             onSelected = { onContinueWatchingPlayManually(item) },
+                                        ),
+                                    )
+                                }
+                                if (canSelectContinueWatchingStreams(item)) {
+                                    add(
+                                        PosterZoomOverlayAction(
+                                            icon = Icons.Rounded.Download,
+                                            label = stringResource(Res.string.download_action_label),
+                                            onSelected = { onContinueWatchingDownload(item) },
                                         ),
                                     )
                                 }

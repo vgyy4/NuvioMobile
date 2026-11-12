@@ -1,9 +1,19 @@
 package com.nuvio.app.features.downloads
 
-internal actual object P2pDownloadPlatform {
-    // Android downloads run in a background job that persists the source URL and can be restarted
-    // after the process dies, when the engine's local stream URL no longer exists.
-    actual val isSupported: Boolean = false
+import android.os.Environment
+import android.os.StatFs
 
-    actual fun freeDiskSpaceBytes(): Long? = null
+internal actual object P2pDownloadPlatform {
+    actual val isSupported: Boolean = true
+
+    // The scheduler's background job opens the torrent stream itself, so torrent downloads keep
+    // going with the app in the background and resume after the process is restarted.
+    actual val runsInPlatformDownloader: Boolean = true
+
+    actual fun freeDiskSpaceBytes(): Long? =
+        runCatching { StatFs(Environment.getDataDirectory().path).availableBytes }.getOrNull()
+
+    actual suspend fun awaitTorrentTransfersStopped() {
+        AndroidTorrentStream.awaitIdle()
+    }
 }

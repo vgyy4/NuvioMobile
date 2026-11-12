@@ -69,7 +69,7 @@ import platform.Foundation.NSFileManager
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSLog
 
-private const val StatsPollIntervalMs = 500L
+private const val StatsPollIntervalMs = 250L
 private const val StartupStatsPollIntervalMs = 1_000L
 private const val CacheStatsPollIntervalMs = 1_000L
 private const val MemoryCacheCapacityBytes = 64L * 1024L * 1024L
