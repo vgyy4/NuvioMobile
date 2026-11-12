@@ -65,6 +65,20 @@ jobs:
           printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
           sed -i '' -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
 
+      - name: Configure official server (no secret provided)
+        if: env.RELEASE_PROPERTIES_BASE64 == ''
+        run: |
+          # Forks have no NUVIO_LOCAL_PROPERTIES_BASE64 secret. The official server
+          # publishes its URL and public anon key at its discovery endpoint, so use that.
+          curl -fsS --retry 3 https://api.nuvio.tv/.well-known/nuvio | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          print("NUVIO_SUPABASE_URL=" + d["backend_url"])
+          print("NUVIO_SUPABASE_ANON_KEY=" + d["publishable_key"])
+          print("NUVIO_SUPABASE_FALLBACK_URL=https://api-two.nuvioapp.space")
+          ' > local.properties
+          grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties
+
       - name: Prepare iOS dependencies
         run: ./scripts/prepare-ios-dependencies.sh
 
