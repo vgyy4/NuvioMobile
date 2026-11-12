@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player
 
+import com.nuvio.app.features.streams.effectiveBingeGroup
 import com.nuvio.app.core.i18n.localizedSeasonEpisodeCode
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
@@ -992,7 +993,7 @@ internal fun PlayerScreenRuntime.tryRefreshCredentialedSourceAfterError(message:
             activeProviderName = stream.addonName
             activeProviderAddonId = stream.addonId
             activeStream = stream
-            currentStreamBingeGroup = stream.behaviorHints.bingeGroup
+            currentStreamBingeGroup = stream.effectiveBingeGroup
             activeSubtitleExtras = SubtitleRequestExtras.from(stream.behaviorHints, refreshedUrl)
             currentStreamFilename = stream.behaviorHints.filename
             currentStreamInfoHash = stream.infoHash
@@ -1052,7 +1053,7 @@ private fun findCredentialRefreshCandidate(
 
             var score = 100
             if (stream.streamLabel == expectedStreamTitle) score += 40
-            if (!expectedBingeGroup.isNullOrBlank() && stream.behaviorHints.bingeGroup == expectedBingeGroup) {
+            if (!expectedBingeGroup.isNullOrBlank() && stream.effectiveBingeGroup == expectedBingeGroup) {
                 score += 20
             }
             if (refreshedUrl.hasLikelyExpiringPlaybackCredentials()) score += 5

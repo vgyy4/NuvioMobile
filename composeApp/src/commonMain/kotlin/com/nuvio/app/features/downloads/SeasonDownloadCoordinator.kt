@@ -6,6 +6,7 @@ import com.nuvio.app.features.debrid.DirectDebridPlaybackResolver
 import com.nuvio.app.features.player.PlayerStreamsRepository
 import com.nuvio.app.features.streams.SeasonBatchEpisode
 import com.nuvio.app.features.streams.StreamItem
+import com.nuvio.app.features.streams.effectiveBingeGroup
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -152,9 +153,9 @@ internal object SeasonDownloadCoordinator {
     /** The release that matches [template], or null if this episode has none. */
     internal fun chooseMatchingSource(template: StreamItem, candidates: List<StreamItem>): StreamItem? {
         val usable = candidates.filter { it.playableDirectUrl != null || (it.isTorrentStream && it.p2pInfoHash != null) }
-        val bingeGroup = template.behaviorHints.bingeGroup?.takeIf { it.isNotBlank() }
-        if (bingeGroup != null) {
-            usable.firstOrNull { it.behaviorHints.bingeGroup == bingeGroup }?.let { return it }
+        val releaseKey = template.effectiveBingeGroup
+        if (releaseKey != null) {
+            usable.firstOrNull { it.effectiveBingeGroup == releaseKey }?.let { return it }
         }
         val templateResolution = template.resolutionToken()
         return usable.firstOrNull { candidate ->
