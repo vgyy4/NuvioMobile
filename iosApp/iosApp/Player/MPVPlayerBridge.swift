@@ -119,6 +119,7 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     }
 
     // Audio tracks
+    func getTrackRevision() -> Int32 { playerVC?.trackRevision ?? 0 }
     func getAudioTrackCount() -> Int32 { Int32(playerVC?.audioTracks.count ?? 0) }
     func getAudioTrackIndex(at: Int32) -> Int32 {
         guard let t = playerVC?.audioTracks, Int(at) < t.count else { return 0 }
@@ -250,7 +251,7 @@ struct PluginSubtitle {
 
 // MARK: - Track Info
 
-struct TrackInfo {
+struct TrackInfo: Equatable {
     let index: Int
     let id: Int
     let type: String
@@ -318,6 +319,9 @@ final class MPVPlayerViewController: UIViewController {
     // Cached track lists
     var audioTracks: [TrackInfo] = []
     var subtitleTracks: [TrackInfo] = []
+    /// Bumped whenever `audioTracks` or `subtitleTracks` change, so Kotlin can reuse the track
+    /// lists it already built instead of re-reading every track on each snapshot.
+    private(set) var trackRevision: Int32 = 0
 
     // State (polled from Kotlin every 250ms)
     var isPlayerLoading: Bool = true
@@ -1197,8 +1201,10 @@ final class MPVPlayerViewController: UIViewController {
                 subIdx += 1
             }
         }
+        let tracksChanged = audio != audioTracks || subs != subtitleTracks
         audioTracks = audio
         subtitleTracks = subs
+        if tracksChanged { trackRevision &+= 1 }
     }
 
     func updateNowPlayingMetadata(
