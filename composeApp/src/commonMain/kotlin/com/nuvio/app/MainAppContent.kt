@@ -1,5 +1,9 @@
 package com.nuvio.app
 
+import com.nuvio.app.features.downloads.deleteDownloadLabel
+import com.nuvio.app.features.downloads.DeleteDownloadsRequest
+import com.nuvio.app.features.downloads.DeleteDownloadsKind
+import com.nuvio.app.features.downloads.DeleteDownloadsHost
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.MutableTransitionState
@@ -347,6 +351,10 @@ internal fun MainAppContent(
     val completedDownloads by completedDownloadsFlow.collectAsStateWithLifecycle(
         initialValue = remember(completedDownloadsFlow) { DownloadsRepository.uiState.value.completedItems },
     )
+    val offlineDownloadsEnabled by remember {
+        DownloadsRepository.ensureLoaded()
+        DownloadsRepository.offlineDownloadsHome
+    }.collectAsStateWithLifecycle()
     val networkStatusUiState by remember {
         NetworkStatusRepository.uiState
     }.collectAsStateWithLifecycle()
@@ -649,7 +657,7 @@ internal fun MainAppContent(
                 val hasPlayableDownload = completedDownloads.any {
                     DownloadsRepository.playableLocalFileUri(it) != null
                 }
-                if (hasPlayableDownload) {
+                if (hasPlayableDownload && !offlineDownloadsEnabled) {
                     activateTab(AppScreenTab.Library)
                     navController.navigate(DownloadsRoute(downloadsTitle)) {
                         launchSingleTop = true
@@ -689,6 +697,7 @@ internal fun MainAppContent(
         }
     }
     var resumePromptItem by remember { mutableStateOf<ContinueWatchingItem?>(null) }
+    var deleteDownloadsRequest by remember { mutableStateOf<DeleteDownloadsRequest?>(null) }
     var lastExternalPlayerLaunch by remember { mutableStateOf<PlayerLaunch?>(null) }
     val activePlaybackProfileId = profileState.activeProfile?.profileIndex ?: ProfileRepository.activeProfileId
     val launchExternalPlayer = rememberExternalPlayerLauncher { result ->
@@ -1461,8 +1470,12 @@ internal fun MainAppContent(
                             libraryDisintegrationRequests.current,
                             continueWatchingDisintegrationRequests.current,
                             requestedSettingsPageName,
+                            offlineDownloadsEnabled && networkStatusUiState.isOfflineLike && completedDownloads.isNotEmpty(),
                         ) {
                             AppTabState(
+                                offlineDownloadsHome = offlineDownloadsEnabled &&
+                                    networkStatusUiState.isOfflineLike &&
+                                    completedDownloads.isNotEmpty(),
                                 searchListState = searchListState,
                                 homeContentGeneration = appContentGeneration,
                                 profileId = profileState.activeProfile?.profileIndex,
@@ -1532,6 +1545,7 @@ internal fun MainAppContent(
                                     }
                                 },
                                 onDownloadsClick = { navController.navigate(DownloadsRoute(downloadsTitle)) },
+                                onOpenDownload = ::openDownloadedItem,
                                 onContinueWatchingClick = onContinueWatchingClick,
                                 onContinueWatchingLongPress = onContinueWatchingLongPress,
                                 onSwitchProfile = onSwitchProfile,
@@ -1974,6 +1988,22 @@ internal fun MainAppContent(
                                     }
                                 },
                             ),
+                            DownloadsRepository.findPlayableDownload(parentMetaId = preview.id)
+                                ?.takeIf { preview.type.equals("movie", ignoreCase = true) }
+                                ?.let { downloadedMovie ->
+                                    PosterZoomOverlayAction(
+                                        icon = Icons.Default.DeleteOutline,
+                                        label = deleteDownloadLabel(DeleteDownloadsKind.Movie),
+                                        isDestructive = true,
+                                        exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                        onSelected = {
+                                            deleteDownloadsRequest = DeleteDownloadsRequest(
+                                                DeleteDownloadsKind.Movie,
+                                                listOf(downloadedMovie.id),
+                                            )
+                                        },
+                                    )
+                                },
                             if (
                                 preview.type.equals("movie", ignoreCase = true) &&
                                 !preview.id.startsWith("tmdb:") &&
@@ -2059,6 +2089,37 @@ internal fun MainAppContent(
                                             icon = Icons.Default.PlayArrow,
                                             label = stringResource(Res.string.play_manually),
                                             onSelected = { onContinueWatchingPlayManually(item) },
+                                        ),
+                                    )
+                                }
+                                DownloadsRepository.findPlayableDownload(
+                                    parentMetaId = item.parentMetaId,
+                                    seasonNumber = item.seasonNumber,
+                                    episodeNumber = item.episodeNumber,
+                                    videoId = item.videoId,
+                                )?.let { downloaded ->
+                                    add(
+                                        PosterZoomOverlayAction(
+                                            icon = Icons.Default.DeleteOutline,
+                                            label = deleteDownloadLabel(
+                                                if (downloaded.isEpisode) {
+                                                    DeleteDownloadsKind.Episode
+                                                } else {
+                                                    DeleteDownloadsKind.Movie
+                                                },
+                                            ),
+                                            isDestructive = true,
+                                            exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                            onSelected = {
+                                                deleteDownloadsRequest = DeleteDownloadsRequest(
+                                                    if (downloaded.isEpisode) {
+                                                        DeleteDownloadsKind.Episode
+                                                    } else {
+                                                        DeleteDownloadsKind.Movie
+                                                    },
+                                                    listOf(downloaded.id),
+                                                )
+                                            },
                                         ),
                                     )
                                 }
@@ -2250,6 +2311,8 @@ internal fun MainAppContent(
                     profileSwitchLoading = false
                 }
             }
+
+            DeleteDownloadsHost(deleteDownloadsRequest) { deleteDownloadsRequest = null }
 
             NuvioFloatingPrompt(
                 visible = resumePromptItem != null,

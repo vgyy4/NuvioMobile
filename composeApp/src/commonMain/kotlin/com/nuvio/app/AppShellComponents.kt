@@ -1,5 +1,8 @@
 package com.nuvio.app
 
+import androidx.compose.runtime.LaunchedEffect
+import com.nuvio.app.features.downloads.DownloadsScreen
+import com.nuvio.app.features.downloads.DownloadItem
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -74,6 +77,8 @@ internal data class AppTabState(
     val libraryDisintegrationRequest: DisintegrationRequest<String>? = null,
     val continueWatchingDisintegrationRequest: DisintegrationRequest<String>? = null,
     val requestedSettingsPageName: String? = null,
+    // True while the device is offline and the user has downloads: home shows them instead.
+    val offlineDownloadsHome: Boolean = false,
 )
 
 internal data class AppTabRequests(
@@ -93,6 +98,7 @@ internal data class AppTabActions(
     val onCloudFilePlay: ((CloudLibraryItem, CloudLibraryFile) -> Unit)? = null,
     val onConnectCloudClick: (() -> Unit)? = null,
     val onDownloadsClick: () -> Unit = {},
+    val onOpenDownload: (DownloadItem) -> Unit = {},
     val onContinueWatchingClick: ((ContinueWatchingItem) -> Unit)? = null,
     val onContinueWatchingLongPress: ((ContinueWatchingItem) -> Unit)? = null,
     val onSwitchProfile: (() -> Unit)? = null,
@@ -129,7 +135,15 @@ internal fun AppTabHost(
         profileId = state.profileId,
     ) { tab ->
         when (tab) {
-            AppScreenTab.Home -> {
+            AppScreenTab.Home -> if (state.offlineDownloadsHome) {
+                // Same screen as the Downloads page of the Library, as the offline home.
+                LaunchedEffect(Unit) { actions.onInitialHomeContentRendered() }
+                DownloadsScreen(
+                    onBack = {},
+                    showBack = false,
+                    onOpenDownload = actions.onOpenDownload,
+                )
+            } else {
                 key(state.homeContentGeneration) {
                     HomeScreen(
                         modifier = Modifier.fillMaxSize(),

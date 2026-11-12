@@ -1708,6 +1708,17 @@
     <string name="streams_copy_link">Copy stream link</string>
     <string name="streams_download_file">Download file</string>
     <string name="download_action_label">Download</string>
+    <string name="downloads_section_continue_watching">Continue watching</string>
+    <string name="settings_homescreen_offline_downloads">Show downloads when offline</string>
+    <string name="settings_homescreen_offline_downloads_description">While the device is offline, the home screen shows your downloads, and comes back by itself when you are online again</string>
+    <string name="delete_download_episode">Delete episode</string>
+    <string name="delete_download_movie">Delete movie</string>
+    <string name="delete_download_season">Delete season</string>
+    <string name="delete_download_episode_title">Delete this episode?</string>
+    <string name="delete_download_movie_title">Delete this movie?</string>
+    <string name="delete_download_season_title">Delete this season?</string>
+    <string name="delete_download_message">The downloaded file will be removed from this device.</string>
+    <string name="delete_download_season_message">%1$d downloaded episodes will be removed from this device.</string>
     <string name="season_download_action">Download season</string>
     <string name="season_download_prompt_title">Download season</string>
     <string name="season_download_prompt_message">%1$d of %2$d episodes are already watched. Download them too?</string>

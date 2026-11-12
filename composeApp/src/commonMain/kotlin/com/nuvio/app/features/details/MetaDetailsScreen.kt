@@ -1,5 +1,12 @@
 package com.nuvio.app.features.details
 
+import com.nuvio.app.core.ui.PosterZoomOverlayExitAnimation
+import androidx.compose.material.icons.filled.DeleteOutline
+import com.nuvio.app.features.downloads.deleteDownloadLabel
+import com.nuvio.app.features.downloads.DownloadsRepository
+import com.nuvio.app.features.downloads.DeleteDownloadsRequest
+import com.nuvio.app.features.downloads.DeleteDownloadsKind
+import com.nuvio.app.features.downloads.DeleteDownloadsHost
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -268,6 +275,7 @@ fun MetaDetailsScreen(
     var selectedEpisodeZoomAnchor by remember(type, id) { mutableStateOf<PosterZoomAnchor?>(null) }
     var episodeToRate by remember(type, id) { mutableStateOf<MetaVideo?>(null) }
     var seasonDownloadPrompt by remember(type, id) { mutableStateOf<SeasonDownloadPrompt?>(null) }
+    var deleteDownloadsRequest by remember(type, id) { mutableStateOf<DeleteDownloadsRequest?>(null) }
     val episodeOverlayHazeState = rememberHazeState()
     var selectedSeasonForActions by remember(type, id) { mutableStateOf<Int?>(null) }
     val commentsEnabled by remember {
@@ -1870,6 +1878,53 @@ fun MetaDetailsScreen(
                             ),
                         )
                     }
+                    // Delete what is downloaded: this episode, and the season when all of it is.
+                    val downloadedEpisode = DownloadsRepository.findPlayableDownload(
+                        parentMetaId = meta.id,
+                        seasonNumber = selectedEpisode.season,
+                        episodeNumber = selectedEpisode.episode,
+                        videoId = selectedEpisode.id,
+                    )
+                    if (downloadedEpisode != null) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Default.DeleteOutline,
+                                label = deleteDownloadLabel(DeleteDownloadsKind.Episode),
+                                isDestructive = true,
+                                exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                onSelected = {
+                                    deleteDownloadsRequest = DeleteDownloadsRequest(
+                                        DeleteDownloadsKind.Episode,
+                                        listOf(downloadedEpisode.id),
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                    val downloadedSeasonEpisodes = seasonEpisodes.mapNotNull { episode ->
+                        DownloadsRepository.findPlayableDownload(
+                            parentMetaId = meta.id,
+                            seasonNumber = episode.season,
+                            episodeNumber = episode.episode,
+                            videoId = episode.id,
+                        )
+                    }
+                    if (seasonEpisodes.isNotEmpty() && downloadedSeasonEpisodes.size == seasonEpisodes.size) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Default.DeleteOutline,
+                                label = deleteDownloadLabel(DeleteDownloadsKind.Season),
+                                isDestructive = true,
+                                exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                onSelected = {
+                                    deleteDownloadsRequest = DeleteDownloadsRequest(
+                                        DeleteDownloadsKind.Season,
+                                        downloadedSeasonEpisodes.map { it.id },
+                                    )
+                                },
+                            ),
+                        )
+                    }
                     if (
                         onDownloadSeason != null &&
                         seasonEpisodes.isNotEmpty() &&
@@ -1911,6 +1966,8 @@ fun MetaDetailsScreen(
                 },
             )
         }
+
+        DeleteDownloadsHost(deleteDownloadsRequest) { deleteDownloadsRequest = null }
 
         seasonDownloadPrompt?.let { prompt ->
             DialogSurface(

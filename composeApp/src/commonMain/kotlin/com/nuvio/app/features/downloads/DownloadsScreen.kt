@@ -42,12 +42,14 @@ import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.features.watchprogress.WatchProgressRepository
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
 fun DownloadsScreen(
     onBack: () -> Unit,
+    showBack: Boolean = true,
     onOpenDownload: (DownloadItem) -> Unit,
     initialShowId: String? = null,
     onNavigateToShow: ((showId: String, title: String) -> Unit)? = null,
@@ -59,6 +61,25 @@ fun DownloadsScreen(
     }.collectAsStateWithLifecycle()
     LaunchedEffect(uiState.completedItems.size) {
         DownloadsRepository.markCompletedSeen()
+    }
+
+    // Started but unfinished downloads, newest first.
+    val watchProgress by remember {
+        WatchProgressRepository.ensureLoaded()
+        WatchProgressRepository.uiState
+    }.collectAsStateWithLifecycle()
+    val continueEntries = remember(uiState.completedItems, watchProgress) {
+        uiState.completedItems
+            .mapNotNull { download ->
+                watchProgress.progressForVideo(
+                    videoId = download.videoId,
+                    parentMetaId = download.parentMetaId,
+                    seasonNumber = download.seasonNumber,
+                    episodeNumber = download.episodeNumber,
+                )?.takeIf { it.isResumable }?.let { entry -> download to entry }
+            }
+            .sortedByDescending { (_, entry) -> entry.lastUpdatedEpochMs }
+            .map { (download, entry) -> DownloadedContinueEntry(download, entry.progressFraction) }
     }
 
     var selectedShowId by rememberSaveable(initialShowId) { mutableStateOf(initialShowId) }
@@ -88,11 +109,15 @@ fun DownloadsScreen(
                 } else {
                     selectedShowTitle ?: stringResource(Res.string.downloads_show_downloads)
                 },
-                onBack = {
-                    if (selectedShowId != null) {
-                        onBackFromShow?.invoke() ?: run { selectedShowId = null }
-                    } else {
-                        onBack()
+                onBack = if (selectedShowId == null && !showBack) {
+                    null
+                } else {
+                    {
+                        if (selectedShowId != null) {
+                            onBackFromShow?.invoke() ?: run { selectedShowId = null }
+                        } else {
+                            onBack()
+                        }
                     }
                 },
                 actions = {
@@ -115,6 +140,7 @@ fun DownloadsScreen(
         if (selectedShowId == null) {
             downloadsRootContent(
                 uiState = uiState,
+                continueEntries = continueEntries,
                 onOpenDownload = onOpenDownload,
                 onOpenShow = { showId, title ->
                     onNavigateToShow?.invoke(showId, title) ?: run { selectedShowId = showId }
@@ -151,6 +177,7 @@ fun DownloadsScreen(
 
 private fun LazyListScope.downloadsRootContent(
     uiState: DownloadsUiState,
+    continueEntries: List<DownloadedContinueEntry>,
     onOpenDownload: (DownloadItem) -> Unit,
     onOpenShow: (showId: String, title: String) -> Unit,
     onDeleteDownload: (String) -> Unit,
@@ -167,41 +194,12 @@ private fun LazyListScope.downloadsRootContent(
         }
         .sortedBy { (item, _) -> item.title.lowercase() }
 
-    if (activeItems.isNotEmpty()) {
+    if (continueEntries.isNotEmpty()) {
         item {
-            SectionTitle(stringResource(Res.string.downloads_section_active))
+            SectionTitle(stringResource(Res.string.downloads_section_continue_watching))
         }
-        items(
-            items = activeItems,
-            key = { it.id },
-        ) { item ->
-            DownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onPause = { DownloadsRepository.pauseDownload(item.id) },
-                onResume = { DownloadsRepository.resumeDownload(item.id) },
-                onRetry = { DownloadsRepository.retryDownload(item.id) },
-                onDelete = { onDeleteDownload(item.id) },
-            )
-        }
-    }
-
-    if (completedMovies.isNotEmpty()) {
         item {
-            SectionTitle(stringResource(Res.string.downloads_section_movies))
-        }
-        items(
-            items = completedMovies,
-            key = { it.id },
-        ) { item ->
-            DownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onPause = { DownloadsRepository.pauseDownload(item.id) },
-                onResume = { DownloadsRepository.resumeDownload(item.id) },
-                onRetry = { DownloadsRepository.retryDownload(item.id) },
-                onDelete = { onDeleteDownload(item.id) },
-            )
+            DownloadsContinueWatchingRow(entries = continueEntries, onOpen = onOpenDownload)
         }
     }
 
@@ -252,6 +250,44 @@ private fun LazyListScope.downloadsRootContent(
                     )
                 }
             }
+        }
+    }
+
+    if (completedMovies.isNotEmpty()) {
+        item {
+            SectionTitle(stringResource(Res.string.downloads_section_movies))
+        }
+        items(
+            items = completedMovies,
+            key = { it.id },
+        ) { item ->
+            DownloadRow(
+                item = item,
+                onOpen = { onOpenDownload(item) },
+                onPause = { DownloadsRepository.pauseDownload(item.id) },
+                onResume = { DownloadsRepository.resumeDownload(item.id) },
+                onRetry = { DownloadsRepository.retryDownload(item.id) },
+                onDelete = { onDeleteDownload(item.id) },
+            )
+        }
+    }
+
+    if (activeItems.isNotEmpty()) {
+        item {
+            SectionTitle(stringResource(Res.string.downloads_section_active))
+        }
+        items(
+            items = activeItems,
+            key = { it.id },
+        ) { item ->
+            DownloadRow(
+                item = item,
+                onOpen = { onOpenDownload(item) },
+                onPause = { DownloadsRepository.pauseDownload(item.id) },
+                onResume = { DownloadsRepository.resumeDownload(item.id) },
+                onRetry = { DownloadsRepository.retryDownload(item.id) },
+                onDelete = { onDeleteDownload(item.id) },
+            )
         }
     }
 
