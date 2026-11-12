@@ -846,23 +846,43 @@ final class MPVPlayerViewController: UIViewController {
         gamma: Int
     ) {
         if #available(iOS 16.0, *) {
-            metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+            if metalLayer.wantsExtendedDynamicRangeContent != extendedDynamicRange {
+                metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+            }
         }
         guard mpv != nil else { return }
 
-        setStringProperty("hwdec", hardwareDecoder)
-        setStringProperty("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
-        setStringProperty("tone-mapping", toneMapping)
+        setStringPropertyIfChanged("hwdec", hardwareDecoder)
+        setStringPropertyIfChanged("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
+        setStringPropertyIfChanged("tone-mapping", toneMapping)
         let isLowMemory = Self.isLowMemoryDevice
-        setStringProperty("hdr-compute-peak", hdrComputePeak && !isLowMemory ? "yes" : "no")
-        setStringProperty("target-prim", targetPrimaries)
-        setStringProperty("target-trc", targetTransfer)
-        setStringProperty("deband", deband && !isLowMemory ? "yes" : "no")
-        setStringProperty("interpolation", interpolation && !isLowMemory ? "yes" : "no")
-        setVideoEqualizer("brightness", brightness)
-        setVideoEqualizer("contrast", contrast)
-        setVideoEqualizer("saturation", saturation)
-        setVideoEqualizer("gamma", gamma)
+        setStringPropertyIfChanged("hdr-compute-peak", hdrComputePeak && !isLowMemory ? "yes" : "no")
+        setStringPropertyIfChanged("target-prim", targetPrimaries)
+        setStringPropertyIfChanged("target-trc", targetTransfer)
+        setStringPropertyIfChanged("deband", deband && !isLowMemory ? "yes" : "no")
+        setStringPropertyIfChanged("interpolation", interpolation && !isLowMemory ? "yes" : "no")
+        setVideoEqualizerIfChanged("brightness", brightness)
+        setVideoEqualizerIfChanged("contrast", contrast)
+        setVideoEqualizerIfChanged("saturation", saturation)
+        setVideoEqualizerIfChanged("gamma", gamma)
+    }
+
+    /// Last value written through `configureVideoOutput` / `configureAudioOutput`, per mpv
+    /// property. Re-setting an identical value still makes mpv reconfigure the decoder, audio
+    /// output or video pipeline, so identical writes are skipped.
+    private var appliedOutputValues: [String: String] = [:]
+
+    private func setStringPropertyIfChanged(_ name: String, _ value: String) {
+        guard mpv != nil, appliedOutputValues[name] != value else { return }
+        appliedOutputValues[name] = value
+        setStringProperty(name, value)
+    }
+
+    private func setVideoEqualizerIfChanged(_ name: String, _ value: Int) {
+        let clamped = String(max(-100, min(100, value)))
+        guard mpv != nil, appliedOutputValues[name] != clamped else { return }
+        appliedOutputValues[name] = clamped
+        setVideoEqualizer(name, value)
     }
 
     func configureAudioOutput(audioOutput: String) {
@@ -873,7 +893,7 @@ final class MPVPlayerViewController: UIViewController {
         } else {
             resolvedAudioOutput = audioOutput
         }
-        setStringProperty("ao", resolvedAudioOutput)
+        setStringPropertyIfChanged("ao", resolvedAudioOutput)
     }
 
     func setSpeed(_ speed: Float) {
