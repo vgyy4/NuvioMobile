@@ -4,16 +4,14 @@ import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
 import com.nuvio.app.features.p2p.P2pSettingsRepository
+import com.nuvio.app.features.p2p.P2pDownloadStream
 import com.nuvio.app.features.p2p.P2pStreamRequest
 import com.nuvio.app.features.p2p.P2pStreamingEngine
-import com.nuvio.app.features.p2p.P2pStreamingState
 import com.nuvio.app.features.p2p.buildP2pMagnetUri
 import com.nuvio.app.features.p2p.formatP2pMegabytes
 import com.nuvio.app.features.player.SubtitleRequestExtras
 import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.streams.StreamItem
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -24,7 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -49,10 +47,8 @@ object DownloadsRepository {
 
     private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
     private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val p2pLock = SynchronizedObject()
-    // Torrent downloads waiting for, or holding, the P2P engine. It serves one torrent at a time,
-    // so they run one after another in the order they were started.
-    private val p2pHandles = mutableListOf<P2pDownloadHandle>()
+    // Limits how many torrents download at once; the rest wait their turn (first come, first served).
+    private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
     private val pausedForBackground = mutableSetOf<String>()
     private var foregroundJob: Job? = null
     private var lastProgressPersistEpochMs = 0L
@@ -471,25 +467,19 @@ object DownloadsRepository {
 
     private fun startP2pDownload(item: DownloadItem) {
         val handle = P2pDownloadHandle(item.id)
-        // Wait for every torrent download started before this one (running, queued, or still
-        // releasing the engine). They finish or get cancelled; either way the engine is then free.
-        val waitFor = synchronized(p2pLock) { p2pHandles.toList().also { p2pHandles.add(handle) } }
         activeHandles[item.id] = handle
         handle.job = p2pScope.launch {
             try {
-                waitFor.forEach { it.job?.join() }
-                // Paused or cancelled while it was waiting.
-                if (handle.stopping) return@launch
                 runP2pDownload(item, handle)
             } finally {
-                synchronized(p2pLock) { p2pHandles.remove(handle) }
                 if (activeHandles[item.id] === handle) activeHandles.remove(item.id)
             }
         }
     }
 
     private suspend fun runP2pDownload(item: DownloadItem, handle: P2pDownloadHandle) {
-        var engineInUse = false
+        var slotHeld = false
+        var stream: P2pDownloadStream? = null
         try {
             val infoHash = item.p2pInfoHash
             P2pSettingsRepository.ensureLoaded()
@@ -501,17 +491,14 @@ object DownloadsRepository {
                 markFailed(item.id, getString(Res.string.downloads_p2p_unavailable))
                 return
             }
-            val engineState = P2pStreamingEngine.state.value
-            if (engineState is P2pStreamingState.Connecting || engineState is P2pStreamingState.Streaming) {
-                // Playback owns the engine. Never stop its stream.
-                markFailed(item.id, getString(Res.string.downloads_p2p_playback_active))
-                return
-            }
 
-            engineInUse = true
-            val localUrl = try {
+            // Only a few torrents run at once; the rest wait here in the order they were started.
+            torrentSlots.acquire()
+            slotHeld = true
+
+            stream = try {
                 withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
-                    P2pStreamingEngine.startStream(
+                    P2pStreamingEngine.openDownloadStream(
                         P2pStreamRequest(
                             infoHash = infoHash,
                             fileIdx = item.p2pFileIdx,
@@ -529,7 +516,7 @@ object DownloadsRepository {
                 )
                 return
             }
-            if (localUrl == null) {
+            if (stream == null) {
                 markFailed(item.id, getString(Res.string.downloads_p2p_no_peers))
                 return
             }
@@ -539,17 +526,26 @@ object DownloadsRepository {
             var spaceChecked = false
             val transfer = DownloadsPlatformDownloader.start(
                 request = DownloadPlatformRequest(
-                    item.copy(sourceUrl = localUrl, sourceHeaders = emptyMap()),
+                    item.copy(sourceUrl = stream.localUrl, sourceHeaders = emptyMap()),
                 ),
                 onProgress = { downloadedBytes, totalBytes ->
-                    if (!spaceChecked && totalBytes != null && totalBytes > 0L) {
-                        spaceChecked = true
-                        val needed = (totalBytes - downloadedBytes).coerceAtLeast(0L) * 2L +
-                            P2P_FREE_SPACE_RESERVE_BYTES
-                        val free = P2pDownloadPlatform.freeDiskSpaceBytes()
-                        if (free != null && free < needed) {
-                            handle.stopping = true
-                            outcome.complete(P2pDownloadOutcome.NotEnoughSpace(needed, free))
+                    if (totalBytes != null && totalBytes > 0L) {
+                        if (!spaceChecked) {
+                            spaceChecked = true
+                            val shortfall = TorrentDiskBudget.reserve(
+                                downloadId = item.id,
+                                totalBytes = totalBytes,
+                                downloadedBytes = downloadedBytes,
+                                freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
+                            )
+                            if (shortfall != null) {
+                                handle.stopping = true
+                                outcome.complete(
+                                    P2pDownloadOutcome.NotEnoughSpace(shortfall.neededBytes, shortfall.freeBytes),
+                                )
+                            }
+                        } else {
+                            TorrentDiskBudget.update(item.id, totalBytes, downloadedBytes)
                         }
                     }
                     if (!handle.stopping) applyProgress(item.id, downloadedBytes, totalBytes)
@@ -606,39 +602,13 @@ object DownloadsRepository {
             handle.stopping = true
             withContext(NonCancellable) {
                 handle.transfer?.cancel()
-                if (engineInUse) releaseP2pEngine()
+                // Gives the engine's cached copy of the file back; the .part file keeps what was
+                // downloaded, so a paused download resumes from there.
+                stream?.let { runCatching { P2pStreamingEngine.closeDownloadStream(it) } }
+                TorrentDiskBudget.release(item.id)
+                if (slotHeld) torrentSlots.release()
             }
         }
-    }
-
-    /** Stops the engine stream and gives the engine's cached copy of the file back to the disk. */
-    private suspend fun releaseP2pEngine() {
-        P2pStreamingEngine.stopStream()
-        withTimeoutOrNull(P2P_STOP_TIMEOUT_MS) {
-            P2pStreamingEngine.state.first {
-                it is P2pStreamingState.Idle || it is P2pStreamingState.Error
-            }
-        }
-        runCatching { P2pStreamingEngine.clearCache() }
-    }
-
-    /**
-     * Playback and torrent downloads cannot share the engine. Call before starting a torrent
-     * stream: pauses a running torrent download and returns once the engine has been released.
-     * The download stays paused and resumes from its partial file when the user resumes it.
-     */
-    suspend fun pauseP2pDownloadsForPlayback() {
-        val handles = synchronized(p2pLock) { p2pHandles.toList() }
-        handles.forEach { handle ->
-            pauseDownload(handle.itemId)
-            handle.cancel()
-        }
-        handles.forEach { it.job?.join() }
-        // Torrent downloads run by the platform downloader (Android).
-        _uiState.value.items
-            .filter { it.isP2p && it.status == DownloadStatus.Downloading }
-            .forEach { pauseDownload(it.id) }
-        P2pDownloadPlatform.awaitTorrentTransfersStopped()
     }
 
     private fun markFailed(downloadId: String, message: String) {
@@ -763,9 +733,6 @@ object DownloadsRepository {
 private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
 private const val ORPHAN_SWEEP_DELAY_MS = 20_000L
 private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
-private const val P2P_STOP_TIMEOUT_MS = 10_000L
-// Headroom on top of the file copy and the engine's cached copy, so the device is not filled up.
-private const val P2P_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
 
 private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
     var job: Job? = null

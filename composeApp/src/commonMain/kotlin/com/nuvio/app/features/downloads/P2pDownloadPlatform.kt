@@ -15,10 +15,4 @@ internal expect object P2pDownloadPlatform {
 
     /** Free bytes on the volume that holds downloads and the engine cache, or null if unknown. */
     fun freeDiskSpaceBytes(): Long?
-
-    /**
-     * Suspends until torrent transfers run by the platform downloader have released the P2P
-     * engine. Call after pausing them. A no-op where [runsInPlatformDownloader] is false.
-     */
-    suspend fun awaitTorrentTransfersStopped()
 }

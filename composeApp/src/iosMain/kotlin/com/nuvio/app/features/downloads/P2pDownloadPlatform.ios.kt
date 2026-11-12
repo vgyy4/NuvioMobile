@@ -8,8 +8,6 @@ internal actual object P2pDownloadPlatform {
     actual val isSupported: Boolean = true
     actual val runsInPlatformDownloader: Boolean = false
 
-    actual suspend fun awaitTorrentTransfersStopped() = Unit
-
     actual fun freeDiskSpaceBytes(): Long? {
         val attributes = NSFileManager.defaultManager
             .attributesOfFileSystemForPath(NSHomeDirectory(), error = null)

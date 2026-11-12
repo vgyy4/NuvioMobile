@@ -138,6 +138,8 @@ actual object P2pStreamingEngine {
     private var engineConfigurationKey: EngineConfigurationKey? = null
     private var currentTorrentId: String? = null
     private var currentStream: NativeStream? = null
+    // Streams opened for downloads, by stream id. Guarded by lifecycleMutex.
+    private val downloadStreams = mutableMapOf<String, NativeStream>()
     private var statsJob: Job? = null
     private var cacheStatsJob: Job? = null
     private var generation = 0L
@@ -209,6 +211,49 @@ actual object P2pStreamingEngine {
         }
     }
 
+    actual suspend fun openDownloadStream(request: P2pStreamRequest): P2pDownloadStream =
+        lifecycleMutex.withLock {
+            var preparedStream: NativeStream? = null
+            try {
+                val magnet = buildP2pMagnetUri(
+                    request.infoHash,
+                    (DefaultTrackers + request.trackers).distinct(),
+                )
+                val activeEngine = ensureEngine()
+                val canonicalHash = canonicalP2pInfoHash(request.infoHash)
+                val torrentId = if (canonicalHash in knownTorrentIds) {
+                    canonicalHash
+                } else {
+                    addMagnet(activeEngine, magnet).also(knownTorrentIds::add)
+                }
+                currentCoroutineContext().ensureActive()
+                val stream = prepareStream(activeEngine, torrentId, request.fileIdx, request.filename)
+                preparedStream = stream
+                currentCoroutineContext().ensureActive()
+                downloadStreams[stream.id] = stream
+                log("download stream ready fileIndex=${stream.fileIndex} fileBytes=${stream.fileSize}")
+                P2pDownloadStream(id = stream.id, localUrl = stream.url)
+            } catch (cancellation: CancellationException) {
+                withContext(NonCancellable) {
+                    preparedStream?.let { runCatching { stopNativeStream(engine, it.id) } }
+                }
+                throw cancellation
+            } catch (error: Throwable) {
+                preparedStream?.let { runCatching { stopNativeStream(engine, it.id) } }
+                throw P2pStreamingException(error.message ?: "Unable to start torrent download")
+            }
+        }
+
+    actual suspend fun closeDownloadStream(stream: P2pDownloadStream): Unit = lifecycleMutex.withLock {
+        val native = downloadStreams.remove(stream.id) ?: return@withLock
+        val activeEngine = engine ?: return@withLock
+        runCatching { stopNativeStream(activeEngine, native.id) }
+        // Streams still in use (playback or other downloads) are protected and stay.
+        runCatching { reclaimDiskCache(activeEngine) }
+        runCatching { updateCacheState(readAggregateStats(activeEngine)) }
+        if (downloadStreams.isEmpty() && currentStream == null) closeEngine()
+    }
+
     actual suspend fun clearCache(): P2pCacheClearResult = lifecycleMutex.withLock {
         check(_state.value !is P2pStreamingState.Connecting &&
             _state.value !is P2pStreamingState.Streaming) {
@@ -252,7 +297,8 @@ actual object P2pStreamingEngine {
         currentTorrentId = null
         _state.value = P2pStreamingState.Idle
         stream?.let { runCatching { stopNativeStream(engine, it.id) } }
-        if (shutdownEngine) closeEngine()
+        // Download streams keep the engine alive; it is closed when the last one closes.
+        if (shutdownEngine && downloadStreams.isEmpty()) closeEngine()
     }
 
     private fun startStartupStatsPolling(
@@ -333,7 +379,9 @@ actual object P2pStreamingEngine {
             torrentProfile = settings.torrentProfile,
             diskCacheCapacityBytes = settings.cacheSize.bytes,
         )
-        engine?.takeIf { engineConfigurationKey == configuration }?.let { return it }
+        // A changed setting must not tear the engine down under running downloads.
+        engine?.takeIf { engineConfigurationKey == configuration || downloadStreams.isNotEmpty() }
+            ?.let { return it }
         closeEngine()
 
         val stateDirectory = "${NSHomeDirectory()}/Library/Application Support/NuvioEngine/state"

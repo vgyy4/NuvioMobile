@@ -5,7 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -75,24 +75,29 @@ fun Modifier.cardDepthVisual(
     }
 
     return if (sheen > 0f) {
-        withEdge.drawWithContent {
-            drawContent()
+        withEdge.drawWithCache {
+            // Built once per size instead of on every frame.
             val sheenHeight = size.height * 0.22f
-            if (sheenHeight > 0f) {
-                val outline = shape.createOutline(size, layoutDirection, this)
-                val shapePath = outline.toPath()
-                clipPath(shapePath) {
-                    drawRect(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = sheen),
-                                Color.Transparent,
-                            ),
-                            startY = 0f,
-                            endY = sheenHeight,
-                        ),
-                        size = Size(size.width, sheenHeight),
-                    )
+            val shapePath = if (sheenHeight > 0f) {
+                shape.createOutline(size, layoutDirection, this).toPath()
+            } else {
+                null
+            }
+            val sheenBrush = Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = sheen),
+                    Color.Transparent,
+                ),
+                startY = 0f,
+                endY = sheenHeight,
+            )
+            val sheenSize = Size(size.width, sheenHeight)
+            onDrawWithContent {
+                drawContent()
+                if (shapePath != null) {
+                    clipPath(shapePath) {
+                        drawRect(brush = sheenBrush, size = sheenSize)
+                    }
                 }
             }
         }

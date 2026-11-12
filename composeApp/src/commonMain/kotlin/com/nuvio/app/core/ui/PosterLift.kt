@@ -72,34 +72,52 @@ internal fun Modifier.posterCardClickable(
     zoomImageUrl: String? = null,
     zoomCornerRadius: Dp = NuvioTokens.Radius.poster,
 ): Modifier {
+    // The lift animation needs every poster to render a second, hidden copy of itself on every
+    // redraw. That is real GPU work for every poster on screen, so devices that cannot spare it
+    // skip it: posters there open without the lift/zoom, and the long-press menu uses a plain
+    // image instead.
+    val liftEnabled = !DevicePerformance.isLowEnd
     val graphicsContext = LocalGraphicsContext.current
-    val source = remember(graphicsContext, zoomImageUrl) { PosterLiftSource(graphicsContext) }
+    val source = if (liftEnabled) {
+        remember(graphicsContext, zoomImageUrl) { PosterLiftSource(graphicsContext) }
+    } else {
+        null
+    }
+    val bounds = remember { PosterBounds() }
     val onPosterClickAnchor = LocalPosterClickAnchor.current
     val posterModifier = Modifier
-        .drawWithContent {
-            source.layer.record { this@drawWithContent.drawContent() }
-            if (!source.isLifted) drawLayer(source.layer)
-        }
+        .then(
+            if (source != null) {
+                Modifier.drawWithContent {
+                    source.layer.record { this@drawWithContent.drawContent() }
+                    if (!source.isLifted) drawLayer(source.layer)
+                }
+            } else {
+                Modifier
+            },
+        )
         .onGloballyPositioned { coordinates ->
             val position = coordinates.positionInRoot()
-            source.bounds = Rect(
+            val rect = Rect(
                 left = position.x,
                 top = position.y,
                 right = position.x + coordinates.size.width,
                 bottom = position.y + coordinates.size.height,
             )
+            bounds.value = rect
+            source?.bounds = rect
         }
         .then(this)
     if (onClick == null && onLongClick == null) return posterModifier
     return posterModifier
         .combinedClickable(
             interactionSource = null,
-            indication = if (onPosterClickAnchor == null) LocalIndication.current else null,
+            indication = if (onPosterClickAnchor == null || !liftEnabled) LocalIndication.current else null,
             onClick = {
                 if (onClick != null) {
-                    source.bounds?.let { bounds ->
+                    bounds.value?.let { cardBounds ->
                         onPosterClickAnchor?.invoke(
-                            PosterZoomAnchor(bounds, zoomImageUrl, zoomCornerRadius).also { it.source = source },
+                            PosterZoomAnchor(cardBounds, zoomImageUrl, zoomCornerRadius).also { it.source = source },
                         )
                     }
                     onClick()
@@ -107,7 +125,7 @@ internal fun Modifier.posterCardClickable(
             },
             onLongClick = onLongClick?.let { longClick ->
                 {
-                    source.bounds?.let { cardBounds ->
+                    bounds.value?.let { cardBounds ->
                         PosterZoomAnchorHolder.stash(
                             PosterZoomAnchor(cardBounds, zoomImageUrl, zoomCornerRadius).also {
                                 it.source = source
@@ -118,6 +136,10 @@ internal fun Modifier.posterCardClickable(
                 }
             },
         )
+}
+
+private class PosterBounds {
+    var value: Rect? = null
 }
 
 internal fun DrawScope.drawLiftedPoster(source: PosterLiftSource) {

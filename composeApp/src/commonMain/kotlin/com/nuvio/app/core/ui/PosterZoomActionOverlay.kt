@@ -361,7 +361,7 @@ fun NuvioPosterZoomActionOverlay(
                         enabled = phase == PosterZoomPhase.Open,
                         onSelected = { select(action) },
                         modifier = Modifier.graphicsLayer {
-                            val stagger = index * 0.07f
+                            val stagger = if (lowEnd) 0f else index * 0.07f
                             val progress = ((menu.value.coerceIn(0f, 1f) - stagger) / (1f - stagger))
                                 .coerceIn(0f, 1f)
                             alpha = progress
@@ -406,7 +406,8 @@ fun NuvioPosterZoomActionOverlay(
                         },
                     )
                     clip = false
-                    shadowElevation = NuvioTokens.Space.s24.toPx() * clamped * shadowFade.value
+                    // An animated blurred shadow is re-rendered every frame; skipped on low-end devices.
+                    shadowElevation = if (lowEnd) 0f else NuvioTokens.Space.s24.toPx() * clamped * shadowFade.value
                 },
         ) {
             DisintegratingContainer(
