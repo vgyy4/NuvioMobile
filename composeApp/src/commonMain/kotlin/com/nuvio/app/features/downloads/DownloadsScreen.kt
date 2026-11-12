@@ -42,7 +42,8 @@ import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
-import com.nuvio.app.features.watchprogress.WatchProgressRepository
+import com.nuvio.app.features.home.rememberCachedHomeContinueWatchingItems
+import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
@@ -63,23 +64,19 @@ fun DownloadsScreen(
         DownloadsRepository.markCompletedSeen()
     }
 
-    // Started but unfinished downloads, newest first.
-    val watchProgress by remember {
-        WatchProgressRepository.ensureLoaded()
-        WatchProgressRepository.uiState
+    // The Continue watching list of Home (same builder, filters, dismissals and sort), narrowed to
+    // what is downloaded on this device.
+    val homeContinueWatching = rememberCachedHomeContinueWatchingItems()
+    val continueWatchingPreferences by remember {
+        ContinueWatchingPreferencesRepository.ensureLoaded()
+        ContinueWatchingPreferencesRepository.uiState
     }.collectAsStateWithLifecycle()
-    val continueEntries = remember(uiState.completedItems, watchProgress) {
-        uiState.completedItems
-            .mapNotNull { download ->
-                watchProgress.progressForVideo(
-                    videoId = download.videoId,
-                    parentMetaId = download.parentMetaId,
-                    seasonNumber = download.seasonNumber,
-                    episodeNumber = download.episodeNumber,
-                )?.takeIf { it.isResumable }?.let { entry -> download to entry }
-            }
-            .sortedByDescending { (_, entry) -> entry.lastUpdatedEpochMs }
-            .map { (download, entry) -> DownloadedContinueEntry(download, entry.progressFraction) }
+    val continueEntries = remember(uiState.completedItems, homeContinueWatching, continueWatchingPreferences.isVisible) {
+        if (continueWatchingPreferences.isVisible) {
+            downloadedContinueWatchingEntries(homeContinueWatching, uiState.completedItems)
+        } else {
+            emptyList()
+        }
     }
 
     var selectedShowId by rememberSaveable(initialShowId) { mutableStateOf(initialShowId) }
