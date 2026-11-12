@@ -102,6 +102,7 @@ import com.nuvio.app.core.ui.rememberArtworkBackdrop
 import com.nuvio.app.core.ui.rememberHeroStretchState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.details.components.DetailActions
 import com.nuvio.app.features.details.components.CommentDetailSheet
 import com.nuvio.app.features.details.components.DetailAdditionalInfoSection
@@ -1819,7 +1820,18 @@ fun MetaDetailsScreen(
                             ),
                         )
                     }
-                    if (onDownloadSource != null && playbackAvailability.canStream(meta.type, selectedEpisode.id)) {
+                    // Downloaded content is not offered for download again.
+                    val downloadedEpisode = DownloadsRepository.findPlayableDownload(
+                        parentMetaId = meta.id,
+                        seasonNumber = selectedEpisode.season,
+                        episodeNumber = selectedEpisode.episode,
+                        videoId = selectedEpisode.id,
+                    )
+                    if (
+                        onDownloadSource != null &&
+                        downloadedEpisode == null &&
+                        playbackAvailability.canStream(meta.type, selectedEpisode.id)
+                    ) {
                         add(
                             PosterZoomOverlayAction(
                                 icon = Icons.Rounded.Download,

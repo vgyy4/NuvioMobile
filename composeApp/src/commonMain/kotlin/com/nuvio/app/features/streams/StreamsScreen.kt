@@ -390,6 +390,13 @@ fun StreamsScreen(
         StreamActionsSheet(
             stream = streamActionsTarget,
             externalPlayerEnabled = playerSettings.externalPlayerEnabled,
+            // Already downloaded: no second download of the same video.
+            canDownload = DownloadsRepository.findPlayableDownload(
+                parentMetaId = parentMetaId,
+                seasonNumber = seasonNumber,
+                episodeNumber = episodeNumber,
+                videoId = videoId,
+            ) == null,
             onDismiss = { streamActionsTarget = null },
             onCopyLink = { stream ->
                 val directUrl = stream.playableDirectUrl ?: stream.externalOpenUrl
@@ -997,6 +1004,7 @@ private fun StreamSourceHeader(
 private fun StreamActionsSheet(
     stream: StreamItem?,
     externalPlayerEnabled: Boolean,
+    canDownload: Boolean,
     onDismiss: () -> Unit,
     onCopyLink: (StreamItem) -> Unit,
     onDownload: (StreamItem) -> Unit,
@@ -1074,16 +1082,18 @@ private fun StreamActionsSheet(
                     }
                 },
             )
-            NuvioBottomSheetActionRow(
-                icon = Icons.Rounded.Download,
-                title = stringResource(Res.string.streams_download_file),
-                onClick = {
-                    onDownload(stream)
-                    coroutineScope.launch {
-                        dismissNuvioBottomSheet(sheetState = sheetState, onDismiss = onDismiss)
-                    }
-                },
-            )
+            if (canDownload) {
+                NuvioBottomSheetActionRow(
+                    icon = Icons.Rounded.Download,
+                    title = stringResource(Res.string.streams_download_file),
+                    onClick = {
+                        onDownload(stream)
+                        coroutineScope.launch {
+                            dismissNuvioBottomSheet(sheetState = sheetState, onDismiss = onDismiss)
+                        }
+                    },
+                )
+            }
         }
     }
 }
