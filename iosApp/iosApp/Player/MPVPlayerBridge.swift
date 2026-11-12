@@ -591,6 +591,7 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
         checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
         configureBundledSubtitleFont()
+        configureShaderCache()
         checkError(mpv_set_option_string(mpv, "keep-open", "yes"))
         checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "auto"))
@@ -634,6 +635,26 @@ final class MPVPlayerViewController: UIViewController {
         }
         checkError(mpv_set_option_string(mpv, "sub-font", "Noto Sans"))
         print("[MPV] Using bundled subtitle font: \(fontURL.lastPathComponent)")
+    }
+
+    /// Persist compiled GPU shaders and ICC profiles across launches (Android sets the same
+    /// directories) so the Vulkan pipeline does not recompile every shader on each playback.
+    private func configureShaderCache() {
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let cacheURL = cachesURL.appendingPathComponent("mpv", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        } catch {
+            print("[MPV] Failed to create shader cache directory: \(error)")
+            return
+        }
+        checkError(mpv_set_option_string(mpv, "gpu-shader-cache", "yes"))
+        cacheURL.path.withCString { path in
+            checkError(mpv_set_option_string(mpv, "gpu-shader-cache-dir", path))
+            checkError(mpv_set_option_string(mpv, "icc-cache-dir", path))
+        }
     }
 
     private func setupNotifications() {
