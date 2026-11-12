@@ -41,6 +41,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -55,6 +57,8 @@ import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
 import com.nuvio.app.core.ui.LocalPosterClickAnchor
 import com.nuvio.app.core.ui.LocalPosterOverlayWarmUp
+import com.nuvio.app.core.ui.PosterOverlayWarmUpGate
+import com.nuvio.app.core.ui.PosterOverlayWarmUpHost
 import com.nuvio.app.core.ui.LocalVerticalBarPadding
 import com.nuvio.app.navigation.PosterNavigationState
 import com.nuvio.app.navigation.posterNavigationEntry
@@ -291,6 +295,9 @@ internal fun MainAppContent(
         // A card that is being held asks for the backdrop of the long-press overlay to be prepared
         // before the long press fires (see LocalPosterOverlayWarmUp).
         var posterOverlayWarm by remember { mutableStateOf(false) }
+        // One-off, invisible run of the overlay once the app is idle (see PosterOverlayWarmUp).
+        var posterOverlayWarmUpRunning by remember { mutableStateOf(false) }
+        val touchActivity = remember { IntArray(1) }
         val currentRouteForWarmUp = rememberUpdatedState(currentRoute)
         val posterOverlayWarmUp = remember {
             { warm: Boolean ->
@@ -529,6 +536,34 @@ internal fun MainAppContent(
         )
     }
     launchOverlayState.targetState = launchOverlayVisible
+
+    LaunchedEffect(initialHomeReady) {
+        if (!initialHomeReady || PosterOverlayWarmUpGate.completed) return@LaunchedEffect
+        delay(3_000)
+        // Wait for a quiet moment: no touch for a while, on a tab, no overlay in use.
+        while (true) {
+            val activity = touchActivity[0]
+            delay(2_000)
+            val idle = touchActivity[0] == activity &&
+                currentRoute is TabsRoute &&
+                selectedPosterActionTarget == null &&
+                selectedContinueWatchingForActions == null &&
+                !posterOverlayWarm
+            if (idle) break
+        }
+        if (PosterOverlayWarmUpGate.completed) return@LaunchedEffect
+        PosterOverlayWarmUpGate.completed = true
+        posterOverlayWarmUpRunning = true
+    }
+    LaunchedEffect(Unit) {
+        // A real overlay (or a card about to open one) takes over: drop the warm-up. Read through a
+        // flow so the shell is not recomposed by it.
+        snapshotFlow {
+            selectedPosterActionTarget != null ||
+                selectedContinueWatchingForActions != null ||
+                posterOverlayWarm
+        }.collect { busy -> if (busy) posterOverlayWarmUpRunning = false }
+    }
 
     LaunchedEffect(
         rootContentReady,
@@ -1387,13 +1422,34 @@ internal fun MainAppContent(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .pointerInput(Unit) {
+                        // Only counts touches (never consumes them), to find a quiet moment.
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(PointerEventPass.Initial)
+                                touchActivity[0]++
+                            }
+                        }
+                    }
                     .background(MaterialTheme.nuvio.colors.background),
             ) {
+            // Below the content, which is opaque, so it is never seen.
+            PosterOverlayWarmUpHost(
+                running = {
+                    posterOverlayWarmUpRunning &&
+                        selectedPosterActionTarget == null &&
+                        selectedContinueWatchingForActions == null &&
+                        !posterOverlayWarm
+                },
+                hazeState = posterOverlayHazeState,
+                onFinished = { posterOverlayWarmUpRunning = false },
+            )
             PosterOverlayHazeSourceBox(
                 active = {
                     selectedPosterActionTarget != null ||
                         selectedContinueWatchingZoomAnchor != null ||
-                        posterOverlayWarm
+                        posterOverlayWarm ||
+                        posterOverlayWarmUpRunning
                 },
                 hazeState = posterOverlayHazeState,
                 modifier = Modifier.fillMaxSize(),

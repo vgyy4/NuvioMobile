@@ -158,6 +158,9 @@ fun NuvioPosterZoomActionOverlay(
     hazeState: HazeState,
     onDismissed: () -> Unit,
     modifier: Modifier = Modifier,
+    // Plays the whole open/close sequence once, without reacting to touch or the back button.
+    // Used by PosterOverlayWarmUp to get the graphics pipelines ready before the first real use.
+    warmUp: Boolean = false,
 ) {
     val tokens = MaterialTheme.nuvio
     val previewShape = RoundedCornerShape(PosterZoomFinalCornerRadius)
@@ -234,7 +237,14 @@ fun NuvioPosterZoomActionOverlay(
         }
     }
 
-    PlatformBackHandler(enabled = true) {
+    if (warmUp) {
+        LaunchedEffect(Unit) {
+            delay(700)
+            close()
+        }
+    }
+
+    PlatformBackHandler(enabled = !warmUp) {
         close()
     }
 
@@ -242,9 +252,15 @@ fun NuvioPosterZoomActionOverlay(
         modifier = modifier
             .fillMaxSize()
             .onGloballyPositioned { coordinates -> rootOrigin = coordinates.positionInRoot() }
-            .pointerInput(Unit) {
-                detectTapGestures { close() }
-            },
+            .then(
+                if (warmUp) {
+                    Modifier
+                } else {
+                    Modifier.pointerInput(Unit) {
+                        detectTapGestures { close() }
+                    }
+                },
+            ),
     ) {
         val anchorAspect = anchor
             ?.boundsInRoot
@@ -365,7 +381,7 @@ fun NuvioPosterZoomActionOverlay(
                     }
                     PosterZoomMenuRow(
                         action = action,
-                        enabled = phase == PosterZoomPhase.Open,
+                        enabled = phase == PosterZoomPhase.Open && !warmUp,
                         onSelected = { select(action) },
                         modifier = Modifier.graphicsLayer {
                             val stagger = index * 0.07f
