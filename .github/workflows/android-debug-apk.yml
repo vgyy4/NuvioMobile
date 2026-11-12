@@ -1,0 +1,63 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ccr-9ba47f5b-ox81vl
+      - ci-ios-build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-debug-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build full debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Use the secret if present; otherwise the official server's public connection details.
+      - name: Prepare runtime properties
+        env:
+          LOCAL_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
+        run: |
+          if [ -n "$LOCAL_PROPERTIES_BASE64" ]; then
+            printf '%s' "$LOCAL_PROPERTIES_BASE64" | base64 --decode > local.properties
+            sed -i -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          fi
+          if ! grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties 2>/dev/null; then
+            curl -fsS --retry 3 https://api.nuvio.tv/.well-known/nuvio | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          print("NUVIO_SUPABASE_URL=" + d["backend_url"])
+          print("NUVIO_SUPABASE_ANON_KEY=" + d["publishable_key"])
+          print("NUVIO_SUPABASE_FALLBACK_URL=https://api-two.nuvioapp.space")
+          ' >> local.properties
+          fi
+
+      - name: Build fullDebug APK
+        run: ./gradlew :androidApp:assembleFullDebug -Pnuvio.android.distribution=full --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-debug-apk
+          path: androidApp/build/outputs/apk/full/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
