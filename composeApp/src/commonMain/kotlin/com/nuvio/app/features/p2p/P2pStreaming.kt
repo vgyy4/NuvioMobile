@@ -226,6 +226,9 @@ sealed class P2pStreamingState {
 
 class P2pStreamingException(message: String) : Exception(message)
 
+/** An engine stream opened for a download. Independent of the playback stream. */
+class P2pDownloadStream(val id: String, val localUrl: String)
+
 expect object P2pStreamingEngine {
     val state: StateFlow<P2pStreamingState>
     val cacheState: StateFlow<P2pCacheUiState>
@@ -233,6 +236,19 @@ expect object P2pStreamingEngine {
     suspend fun clearCache(): P2pCacheClearResult
     fun stopStream()
     fun shutdown()
+
+    /**
+     * Opens an additional stream for a download. Any number can be open at once, alongside the
+     * playback stream; none of them stops the others. The engine is kept alive while any is open.
+     * Starts are handled one at a time, then the downloads themselves run in parallel.
+     */
+    suspend fun openDownloadStream(request: P2pStreamRequest): P2pDownloadStream
+
+    /**
+     * Closes a download stream and gives back the engine's cached copy of its file (a file still
+     * being played or downloaded is never touched). Closes the engine once nothing uses it.
+     */
+    suspend fun closeDownloadStream(stream: P2pDownloadStream)
 }
 
 internal fun formatP2pSpeed(bytesPerSec: Long): String {

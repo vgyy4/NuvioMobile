@@ -189,16 +189,23 @@ internal class AndroidDownloadScheduler(val context: Context) {
                         onHeaders = { total, validator ->
                             if (torrent != null && total != null) {
                                 // While the stream is open the engine caches the file as well, so
-                                // twice the remaining size must fit, plus some headroom.
-                                val remaining = (total - File(directory, "$fileName.part").length()).coerceAtLeast(0L)
-                                val needed = remaining * 2L + TORRENT_FREE_SPACE_RESERVE_BYTES
-                                val free = P2pDownloadPlatform.freeDiskSpaceBytes()
-                                if (free != null && free < needed) throw NotEnoughSpaceException(needed, free)
+                                // twice the remaining size must fit, on top of what other running
+                                // torrent downloads still have to write.
+                                val shortfall = TorrentDiskBudget.reserve(
+                                    downloadId = transfer.item.id,
+                                    totalBytes = total,
+                                    downloadedBytes = File(directory, "$fileName.part").length(),
+                                    freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
+                                )
+                                if (shortfall != null) throw NotEnoughSpaceException(shortfall.neededBytes, shortfall.freeBytes)
                             }
                             updateActive(transfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
                         },
                         onProgress = { bytes, total ->
                             val now = SystemClock.elapsedRealtime()
+                            if (torrent != null && total != null) {
+                                TorrentDiskBudget.update(transfer.item.id, total, bytes)
+                            }
                             if (now - lastProgressAt >= 1_000L || bytes == total) {
                                 lastProgressAt = now
                                 updateActive(transfer) {
@@ -287,8 +294,6 @@ internal class AndroidDownloadScheduler(val context: Context) {
         const val GENERATION = "download_generation"
         const val JOB_NAMESPACE = "nuvio-downloads"
         private const val ORPHAN_MIN_AGE_MS = 2L * 60L * 1_000L
-        // Headroom on top of the file copy and the engine's cached copy of a torrent download.
-        internal const val TORRENT_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
     }
 }
 

@@ -12,8 +12,4 @@ internal actual object P2pDownloadPlatform {
 
     actual fun freeDiskSpaceBytes(): Long? =
         runCatching { StatFs(Environment.getDataDirectory().path).availableBytes }.getOrNull()
-
-    actual suspend fun awaitTorrentTransfersStopped() {
-        AndroidTorrentStream.awaitIdle()
-    }
 }

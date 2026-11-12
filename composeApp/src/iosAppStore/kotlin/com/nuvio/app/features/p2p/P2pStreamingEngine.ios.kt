@@ -26,4 +26,9 @@ actual object P2pStreamingEngine {
     actual fun shutdown() {
         _state.value = P2pStreamingState.Idle
     }
+
+    actual suspend fun openDownloadStream(request: P2pStreamRequest): P2pDownloadStream =
+        throw P2pStreamingException("P2P streaming is not available on this platform")
+
+    actual suspend fun closeDownloadStream(stream: P2pDownloadStream) = Unit
 }
