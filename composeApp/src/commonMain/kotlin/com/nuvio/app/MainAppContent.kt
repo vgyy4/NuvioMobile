@@ -13,6 +13,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -37,6 +38,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -56,6 +58,7 @@ import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
 import com.nuvio.app.core.ui.LocalPosterClickAnchor
+import com.nuvio.app.core.ui.LocalPosterOverlayWarmUp
 import com.nuvio.app.core.ui.LocalVerticalBarPadding
 import com.nuvio.app.navigation.PosterNavigationState
 import com.nuvio.app.navigation.posterNavigationEntry
@@ -187,9 +190,11 @@ import com.nuvio.app.features.watchprogress.continueWatchingItemKey
 import com.nuvio.app.features.watchprogress.nextUpDismissKey
 import com.nuvio.app.features.watchprogress.toContinueWatchingItem
 import com.nuvio.app.navigation.*
+import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.nuvio.app.features.servers.ServerRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -286,6 +291,24 @@ internal fun MainAppContent(
         var selectedPosterActionTarget by remember { mutableStateOf<PosterActionTarget?>(null) }
         var selectedPosterAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
         val posterOverlayHazeState = rememberHazeState()
+        // A card that is being held asks for the backdrop of the long-press overlay to be prepared
+        // before the long press fires (see LocalPosterOverlayWarmUp).
+        var posterOverlayWarm by remember { mutableStateOf(false) }
+        val currentRouteForWarmUp = rememberUpdatedState(currentRoute)
+        val posterOverlayWarmUp = remember {
+            { warm: Boolean ->
+                val route = currentRouteForWarmUp.value
+                // Details screens host their own overlay; only the shell's one is prepared here.
+                posterOverlayWarm = warm && (route is TabsRoute || route is CatalogRoute)
+            }
+        }
+        LaunchedEffect(posterOverlayWarm) {
+            if (posterOverlayWarm) {
+                // Safety net: never keep the extra backdrop recording around for long.
+                delay(4_000)
+                posterOverlayWarm = false
+            }
+        }
         var selectedContinueWatchingForActions by remember { mutableStateOf<ContinueWatchingItem?>(null) }
         var selectedContinueWatchingZoomAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
         val libraryDisintegrationRequests = remember { DisintegrationRequestController<String>() }
@@ -1405,23 +1428,21 @@ internal fun MainAppContent(
                     .fillMaxSize()
                     .background(MaterialTheme.nuvio.colors.background),
             ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null) {
-                            Modifier.hazeSource(state = posterOverlayHazeState)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .background(MaterialTheme.nuvio.colors.background),
+            PosterOverlayHazeSourceBox(
+                active = {
+                    selectedPosterActionTarget != null ||
+                        selectedContinueWatchingZoomAnchor != null ||
+                        posterOverlayWarm
+                },
+                hazeState = posterOverlayHazeState,
+                modifier = Modifier.fillMaxSize(),
             ) {
             val verticalBarPadding = LocalVerticalBarPadding.current
             val drawsUnderVerticalBar = currentRoute.drawsUnderVerticalBar(selectedTab)
             SharedTransitionLayout {
                 CompositionLocalProvider(
                     LocalPosterClickAnchor provides if (posterNavigationEnabled) posterNavigation::prepare else null,
+                    LocalPosterOverlayWarmUp provides posterOverlayWarmUp,
                     LocalUseNativeNavigation provides useNativeNavigation,
                     LocalNativeNavigationBarHidden provides (currentRoute?.hidesNavigationBar == true),
                     LocalVerticalBarPadding provides if (drawsUnderVerticalBar) verticalBarPadding else PaddingValues(),
@@ -1835,6 +1856,7 @@ internal fun MainAppContent(
             }
             }
 
+            PosterOverlayHost {
             selectedPosterActionTarget?.let { posterActionTarget ->
                 key(posterActionTarget) {
                     val preview = posterActionTarget.preview
@@ -2206,6 +2228,7 @@ internal fun MainAppContent(
                     selectedContinueWatchingForActions?.let(onContinueWatchingRemove)
                 },
             )
+            }
 
             TrackingListPickerDialog(
                 visible = showLibraryListPicker,
@@ -2348,3 +2371,29 @@ private fun AppRoute?.drawsUnderVerticalBar(selectedTab: AppScreenTab): Boolean 
         is TabsRoute -> selectedTab == AppScreenTab.Home || selectedTab == AppScreenTab.Library
         else -> false
     }
+
+/**
+ * The content of the app, recorded as the blur source of the long-press overlay while that overlay
+ * (or a card about to open it) needs it. [active] is read here, not by the caller, so switching it
+ * does not recompose the whole app shell.
+ */
+@Composable
+private fun PosterOverlayHazeSourceBox(
+    active: () -> Boolean,
+    hazeState: HazeState,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .then(if (active()) Modifier.hazeSource(state = hazeState) else Modifier)
+            .background(MaterialTheme.nuvio.colors.background),
+        content = content,
+    )
+}
+
+/** Own recomposition scope for the long-press overlays, so opening one does not recompose the shell. */
+@Composable
+private fun PosterOverlayHost(content: @Composable () -> Unit) {
+    content()
+}
