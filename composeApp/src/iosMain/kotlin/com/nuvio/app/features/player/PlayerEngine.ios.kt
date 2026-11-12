@@ -31,8 +31,9 @@ import com.nuvio.app.features.autosync.AutoSyncMpvEngineController
 import com.nuvio.app.features.autosync.IosAutoSyncMpvPlatform
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import nuvio.composeapp.generated.resources.Res
@@ -42,6 +43,10 @@ import org.jetbrains.compose.resources.getString
 import org.jetbrains.compose.resources.stringResource
 
 private const val TAG = "NuvioiOSPlayer"
+private const val IOS_PLAYING_POLL_INTERVAL_MS = 250L
+private const val IOS_IDLE_POLL_INTERVAL_MS = 1_000L
+// Keep polling at the playing rate for ~2 s after a command or a state change.
+private const val IOS_FAST_POLLS_AFTER_WAKE = 8
 
 @OptIn(ExperimentalForeignApi::class)
 @Composable
@@ -87,6 +92,9 @@ actual fun PlatformPlayerSurface(
         return
     }
 
+    // Wakes the snapshot poll loop out of its slow paused/loading wait after a command.
+    val pollWake = remember(bridge) { Channel<Unit>(Channel.CONFLATED) }
+
     val controller = remember(bridge) {
         object : PlayerEngineController, PlayerSystemControlSource {
             override val keepsPlaybackInBackground: Boolean
@@ -98,22 +106,27 @@ actual fun PlatformPlayerSurface(
 
             override fun play() {
                 bridge.play()
+                pollWake.trySend(Unit)
             }
 
             override fun pause() {
                 bridge.pause()
+                pollWake.trySend(Unit)
             }
 
             override fun seekTo(positionMs: Long) {
                 bridge.seekTo(positionMs)
+                pollWake.trySend(Unit)
             }
 
             override fun seekBy(offsetMs: Long) {
                 bridge.seekBy(offsetMs)
+                pollWake.trySend(Unit)
             }
 
             override fun retry() {
                 bridge.retry()
+                pollWake.trySend(Unit)
             }
 
             override fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {
@@ -142,6 +155,7 @@ actual fun PlatformPlayerSurface(
 
             override fun setPlaybackSpeed(speed: Float) {
                 bridge.setPlaybackSpeed(speed)
+                pollWake.trySend(Unit)
             }
 
             override fun setMuted(muted: Boolean) {
@@ -363,11 +377,13 @@ actual fun PlatformPlayerSurface(
         } else {
             bridge.pause()
         }
+        pollWake.trySend(Unit)
     }
 
     // Update playWhenReady
     LaunchedEffect(bridge, playWhenReady) {
         if (playWhenReady) bridge.play() else bridge.pause()
+        pollWake.trySend(Unit)
     }
 
     // Update resize mode
@@ -388,6 +404,9 @@ actual fun PlatformPlayerSurface(
     // Polling for snapshots
     LaunchedEffect(bridge) {
         var lastReportedError: String? = null
+        var lastPlaying: Boolean? = null
+        var lastLoading: Boolean? = null
+        var fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
         while (isActive) {
             val snapshot = PlayerPlaybackSnapshot(
                 isLoading = bridge.getIsLoading(),
@@ -404,7 +423,19 @@ actual fun PlatformPlayerSurface(
                 lastReportedError = errorMessage
                 latestOnError.value(errorMessage)
             }
-            delay(250L)
+            // Poll at ~4 Hz while playing; once paused/loading settles, drop to ~1 Hz. A command
+            // (play, seek, ...) or a play/loading state change re-arms the fast rate immediately.
+            if (snapshot.isPlaying != lastPlaying || snapshot.isLoading != lastLoading) {
+                fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
+            }
+            lastPlaying = snapshot.isPlaying
+            lastLoading = snapshot.isLoading
+            val fast = (snapshot.isPlaying && !snapshot.isLoading) || fastPollsRemaining > 0
+            if (fastPollsRemaining > 0) fastPollsRemaining--
+            val interval = if (fast) IOS_PLAYING_POLL_INTERVAL_MS else IOS_IDLE_POLL_INTERVAL_MS
+            if (withTimeoutOrNull(interval) { pollWake.receive() } != null) {
+                fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
+            }
         }
     }
 

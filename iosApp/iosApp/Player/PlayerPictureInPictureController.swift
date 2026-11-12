@@ -41,6 +41,15 @@ final class PlayerPictureInPictureController: NSObject,
     private var restoringInline = false
     private var inlinePresentationPrepared = false
 
+    /// What AVKit last queried through the playback delegate; see `updatePlaybackState(force:)`.
+    private struct PublishedPlaybackState: Equatable {
+        let isPlaying: Bool
+        let isLoading: Bool
+        let speed: Float
+        let durationMs: Int64
+    }
+    private var lastPublishedPlaybackState: PublishedPlaybackState?
+
     private func cancelInlinePresentationWait() {
         waitingForInlinePresentation = false
         restoringInline = false
@@ -182,13 +191,16 @@ final class PlayerPictureInPictureController: NSObject,
                 self.frameLock.lock()
                 let accepts = self.acceptingFrames
                 self.frameLock.unlock()
-                if accepts { self.updatePlaybackState() }
+                if accepts { self.updatePlaybackState(force: true) }
             }
         }
         enqueueFrame(sample)
     }
 
-    func updatePlaybackState() {
+    /// Called on every playback poll tick. The timebase is kept in sync every time, but AVKit is
+    /// only told to re-query the playback state when something it reads changed, while PiP is
+    /// starting/active, or when [force] is set by an explicit PiP event.
+    func updatePlaybackState(force: Bool = false) {
         if waitingForInlinePresentation,
            owner?.isPlayerPlaying != true || owner?.isPlayerLoading == true {
             cancelInlinePresentationWait()
@@ -201,7 +213,18 @@ final class PlayerPictureInPictureController: NSObject,
             CMTimebaseSetTime(timebase, time: CMTime(seconds: position, preferredTimescale: 60000))
         }
         CMTimebaseSetRate(timebase, rate: owner.isPlayerPlaying ? Double(owner.currentSpeed) : 0)
-        controller?.invalidatePlaybackState()
+        guard let controller else { return }
+        let state = PublishedPlaybackState(
+            isPlaying: owner.isPlayerPlaying,
+            isLoading: owner.isPlayerLoading,
+            speed: owner.currentSpeed,
+            durationMs: owner.durationMs
+        )
+        if force || keepsPlaybackAlive || controller.isPictureInPictureActive
+            || state != lastPublishedPlaybackState {
+            lastPublishedPlaybackState = state
+            controller.invalidatePlaybackState()
+        }
     }
 
     func enteredBackground() -> Bool {
@@ -302,7 +325,7 @@ final class PlayerPictureInPictureController: NSObject,
         cancelInlinePresentationWait()
         isStarting = true
         metalLayer?.nuvioPiPConsumesVideo = true
-        updatePlaybackState()
+        updatePlaybackState(force: true)
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
@@ -361,7 +384,7 @@ final class PlayerPictureInPictureController: NSObject,
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
         owner?.requestSystemPlaying(playing)
-        updatePlaybackState()
+        updatePlaybackState(force: true)
     }
 
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
@@ -382,7 +405,7 @@ final class PlayerPictureInPictureController: NSObject,
         if let owner, owner.durationMs > 0 {
             owner.requestSystemSeekBy(Int64(CMTimeGetSeconds(skipInterval) * 1000))
         }
-        updatePlaybackState()
+        updatePlaybackState(force: true)
         completionHandler()
     }
 }
