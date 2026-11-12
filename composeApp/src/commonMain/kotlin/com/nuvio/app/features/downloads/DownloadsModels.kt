@@ -50,6 +50,9 @@ data class DownloadItem(
     val p2pFileIdx: Int? = null,
     val p2pFilename: String? = null,
     val p2pTrackers: List<String> = emptyList(),
+    // Whether subtitles are downloaded with the video, and which languages (empty = all).
+    val downloadSubtitles: Boolean = true,
+    val subtitleLanguages: List<String> = emptyList(),
     val localFileUri: String? = null,
     val fileName: String,
     val status: DownloadStatus,
@@ -86,6 +89,21 @@ data class DownloadItem(
             "${parentMetaId.trim()}|movie"
         }
 }
+
+@Serializable
+enum class DownloadSubtitleMode {
+    /** Ask before each download whether to include the available subtitles. */
+    Ask,
+    Always,
+    Never,
+}
+
+@Serializable
+data class DownloadPreferences(
+    val subtitleMode: DownloadSubtitleMode = DownloadSubtitleMode.Ask,
+    /** Languages whose subtitles are downloaded; empty means every language. */
+    val subtitleLanguages: List<String> = emptyList(),
+)
 
 data class DownloadsUiState(
     val items: List<DownloadItem> = emptyList(),

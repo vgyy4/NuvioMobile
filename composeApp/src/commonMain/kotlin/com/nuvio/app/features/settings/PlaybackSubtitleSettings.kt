@@ -114,6 +114,8 @@ internal fun PlaybackSubtitleSettings(
             }
         }
 
+        DownloadSubtitleSettings(isTablet = isTablet)
+
         SettingsSection(
             title = stringResource(Res.string.settings_playback_section_subtitle_rendering),
             isTablet = isTablet,

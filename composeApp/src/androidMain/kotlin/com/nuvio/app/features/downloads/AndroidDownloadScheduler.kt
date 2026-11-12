@@ -137,14 +137,15 @@ internal class AndroidDownloadScheduler(val context: Context) {
     fun removeOrphanedPartialFiles(knownFileNames: Set<String>) {
         cleanupScope.launch {
             val now = System.currentTimeMillis()
+            // Partial files and subtitle folders that belong to no download (e.g. after a crash).
             directory.listFiles().orEmpty()
-                .filter { it.isFile && it.name.endsWith(".part") }
+                .filter { (it.isFile && it.name.endsWith(".part")) || (it.isDirectory && it.name.endsWith(".subtitles")) }
                 .forEach { file ->
-                    val fileName = file.name.removeSuffix(".part")
+                    val fileName = file.name.removeSuffix(".part").removeSuffix(".subtitles")
                     if (fileName in knownFileNames || store.get(fileName) != null) return@forEach
                     if (now - file.lastModified() < ORPHAN_MIN_AGE_MS) return@forEach
                     lock(fileName).withLock {
-                        if (store.get(fileName) == null) file.delete()
+                        if (store.get(fileName) == null) file.deleteRecursively()
                     }
                 }
         }

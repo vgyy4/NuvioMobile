@@ -71,6 +71,8 @@ import com.nuvio.app.core.ui.backdropControlColor
 import com.nuvio.app.core.ui.dismissNuvioBottomSheet
 import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.core.ui.rememberArtworkBackdrop
+import com.nuvio.app.features.downloads.DownloadEnqueueResult
+import com.nuvio.app.features.downloads.DownloadSubtitleMode
 import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -91,7 +93,8 @@ import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import com.nuvio.app.features.watched.WatchedRepository
 import com.nuvio.app.features.watched.watchedItemKeys
 import com.nuvio.app.navigation.LocalUseNativeNavigation
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import nuvio.composeapp.generated.resources.*
@@ -168,62 +171,71 @@ fun StreamsScreen(
     var streamActionsTarget by remember(videoId) { mutableStateOf<StreamItem?>(null) }
     val downloadScope = rememberCoroutineScope()
 
-    // Returns the job that finishes the download request (debrid resolution + toast) so callers that
-    // leave this screen can wait for it first; the scope is cancelled when the screen goes away.
-    fun startStreamDownload(stream: StreamItem): Job {
-        return if (DirectDebridPlaybackResolver.shouldResolveToPlayableStream(stream)) {
-            downloadScope.launch {
-                val resolved = DirectDebridPlaybackResolver.resolveToPlayableStream(
-                    stream = stream,
-                    season = seasonNumber,
-                    episode = episodeNumber,
-                )
-                when (resolved) {
-                    is DirectDebridPlayableResult.Success -> {
-                        val result = DownloadsRepository.enqueueFromStream(
-                            contentType = type,
-                            videoId = videoId,
-                            parentMetaId = parentMetaId,
-                            parentMetaType = parentMetaType,
-                            title = title,
-                            logo = logo,
-                            poster = poster,
-                            background = background,
-                            seasonNumber = seasonNumber,
-                            episodeNumber = episodeNumber,
-                            episodeTitle = episodeTitle,
-                            episodeThumbnail = episodeThumbnail,
-                            stream = resolved.stream,
-                        )
-                        NuvioToastController.show(result.toastMessage())
-                    }
-                    else -> {
-                        val message = resolved.toastMessage()
-                        if (message != null) {
-                            NuvioToastController.show(message)
-                        }
-                    }
+    var subtitlePrompt by remember { mutableStateOf<DownloadSubtitlePrompt?>(null) }
+
+    // Starts the download of [stream]: resolves debrid links, asks about subtitles when the
+    // settings say so, then queues it. Returns true if the download was started. The screen's
+    // scope is cancelled when it goes away, so callers that leave wait for the result first.
+    fun startStreamDownload(stream: StreamItem): Deferred<Boolean> = downloadScope.async {
+        val target: StreamItem = if (DirectDebridPlaybackResolver.shouldResolveToPlayableStream(stream)) {
+            val resolved = DirectDebridPlaybackResolver.resolveToPlayableStream(
+                stream = stream,
+                season = seasonNumber,
+                episode = episodeNumber,
+            )
+            when (resolved) {
+                is DirectDebridPlayableResult.Success -> resolved.stream
+                else -> {
+                    resolved.toastMessage()?.let { NuvioToastController.show(it) }
+                    return@async false
                 }
             }
         } else {
-            val result = DownloadsRepository.enqueueFromStream(
-                contentType = type,
-                videoId = videoId,
-                parentMetaId = parentMetaId,
-                parentMetaType = parentMetaType,
-                title = title,
-                logo = logo,
-                poster = poster,
-                background = background,
-                seasonNumber = seasonNumber,
-                episodeNumber = episodeNumber,
-                episodeTitle = episodeTitle,
-                episodeThumbnail = episodeThumbnail,
-                stream = stream,
-            )
-            downloadScope.launch { NuvioToastController.show(result.toastMessage()) }
+            stream
         }
+
+        val includeSubtitles = when (DownloadsRepository.preferences.value.subtitleMode) {
+            DownloadSubtitleMode.Never -> false
+            DownloadSubtitleMode.Always -> true
+            DownloadSubtitleMode.Ask -> {
+                val languages = DownloadsRepository.previewSubtitleLanguages(type, videoId, target)
+                if (languages.isEmpty()) {
+                    false
+                } else {
+                    val prompt = DownloadSubtitlePrompt(languages)
+                    subtitlePrompt = prompt
+                    val answer = try {
+                        prompt.answer.await()
+                    } finally {
+                        subtitlePrompt = null
+                    }
+                    // Dismissing the question cancels the download.
+                    answer ?: return@async false
+                }
+            }
+        }
+
+        val result = DownloadsRepository.enqueueFromStream(
+            contentType = type,
+            videoId = videoId,
+            parentMetaId = parentMetaId,
+            parentMetaType = parentMetaType,
+            title = title,
+            logo = logo,
+            poster = poster,
+            background = background,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            episodeTitle = episodeTitle,
+            episodeThumbnail = episodeThumbnail,
+            stream = target,
+            downloadSubtitles = includeSubtitles,
+        )
+        NuvioToastController.show(result.toastMessage())
+        result == DownloadEnqueueResult.Started || result == DownloadEnqueueResult.Replaced
     }
+
+    subtitlePrompt?.let { DownloadSubtitlePromptDialog(it) }
 
     var preferredFilterApplied by remember(videoId) { mutableStateOf(false) }
     val episodeProgress = watchProgressUiState.progressForVideo(
@@ -319,8 +331,8 @@ fun StreamsScreen(
                     if (downloadOnly) {
                         val request = startStreamDownload(stream)
                         downloadScope.launch {
-                            request.join()
-                            onBack()
+                            // Stay on the list if nothing was started, so another source can be picked.
+                            if (request.await()) onBack()
                         }
                     } else {
                         onStreamSelected(stream, positionMs, progressFraction)
@@ -349,8 +361,8 @@ fun StreamsScreen(
                     if (downloadOnly) {
                         val request = startStreamDownload(stream)
                         downloadScope.launch {
-                            request.join()
-                            onBack()
+                            // Stay on the list if nothing was started, so another source can be picked.
+                            if (request.await()) onBack()
                         }
                     } else {
                         onStreamSelected(stream, positionMs, progressFraction)
