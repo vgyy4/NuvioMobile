@@ -535,17 +535,32 @@ final class MPVPlayerViewController: UIViewController {
     // MARK: - Low-memory device profile
 
     /// Devices with roughly 2 GB of RAM or less (iPad Air 2, iPad 5th gen, iPhone 6s/7/8 ...).
-    /// mpv's defaults (150 MiB forward + 150 MiB back demuxer cache, compute-shader HDR peak
-    /// detection, polyphase scalers) are tuned for desktops and risk jetsam kills or dropped
-    /// frames on these devices.
+    /// mpv's defaults (compute-shader HDR peak detection, polyphase scalers) are tuned for
+    /// desktops and risk jetsam kills or dropped frames on these devices.
     static let isLowMemoryDevice: Bool =
         ProcessInfo.processInfo.physicalMemory <= 2_684_354_560 // 2.5 GiB
 
+    /// Devices with roughly 3 GB of RAM (>2.5 GiB, <=3.5 GiB): iPhone XR/11/SE 2/3 ...
+    private static let isMediumMemoryDevice: Bool =
+        !isLowMemoryDevice && ProcessInfo.processInfo.physicalMemory <= 3_758_096_384 // 3.5 GiB
+
+    /// Bounds mpv's demuxer cache by RAM. mpv's defaults are 150 MiB forward + 150 MiB back, which
+    /// is far more than a streaming player needs and counts against the jetsam limit.
+    private func applyDemuxerCacheLimits() {
+        if Self.isLowMemoryDevice {
+            checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "48MiB"))
+            checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "16MiB"))
+            return
+        }
+        if Self.isMediumMemoryDevice {
+            checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "96MiB"))
+        }
+        // Larger devices keep mpv's default forward cache.
+        checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "32MiB"))
+    }
+
     private func applyLowMemoryDeviceProfile() {
         guard Self.isLowMemoryDevice else { return }
-        // Bound the demuxer cache.
-        checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "48MiB"))
-        checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "16MiB"))
         // Cheap scalers, no dithering / sigmoid / correct-downscaling passes.
         checkError(mpv_set_option_string(mpv, "scale", "bilinear"))
         checkError(mpv_set_option_string(mpv, "cscale", "bilinear"))
@@ -600,6 +615,7 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "auto"))
         checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "yes"))
+        applyDemuxerCacheLimits()
         applyLowMemoryDeviceProfile()
 
         checkError(mpv_initialize(mpv))
