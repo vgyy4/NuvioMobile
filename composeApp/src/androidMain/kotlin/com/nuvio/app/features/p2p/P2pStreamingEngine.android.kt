@@ -8,6 +8,7 @@ import com.nuvio.engine.NuvioEngine
 import com.nuvio.engine.NuvioEngineConfig
 import com.nuvio.engine.NuvioEventType
 import com.nuvio.engine.NuvioStream
+import com.nuvio.engine.NuvioStreamMode
 import com.nuvio.engine.NuvioTorrentProfile
 import com.nuvio.engine.NuvioUploadMode
 import java.io.File
@@ -175,6 +176,8 @@ actual object P2pStreamingEngine {
                         torrentId = torrentId,
                         fileIndex = request.fileIdx,
                         filenameHint = request.filename,
+                        // Saved bytes: hash-verified data only, no playback deadlines.
+                        mode = NuvioStreamMode.DOWNLOAD,
                     )
                     preparedStream = stream
                     currentCoroutineContext().ensureActive()
