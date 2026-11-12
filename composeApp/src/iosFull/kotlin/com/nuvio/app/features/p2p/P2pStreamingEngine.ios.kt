@@ -68,11 +68,20 @@ import kotlinx.coroutines.withContext
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSLog
+import platform.Foundation.NSProcessInfo
 
 private const val StatsPollIntervalMs = 250L
 private const val StartupStatsPollIntervalMs = 1_000L
 private const val CacheStatsPollIntervalMs = 1_000L
-private const val MemoryCacheCapacityBytes = 64L * 1024L * 1024L
+// Devices with <= 2.5 GiB of RAM (iPad Air 2, iPhone 6s/7/8 ...) get a smaller in-memory
+// piece cache so the engine does not push the app towards a jetsam kill.
+private const val LowMemoryDeviceThresholdBytes = 2_684_354_560uL
+private val MemoryCacheCapacityBytes: Long =
+    if (NSProcessInfo.processInfo.physicalMemory <= LowMemoryDeviceThresholdBytes) {
+        24L * 1024L * 1024L
+    } else {
+        64L * 1024L * 1024L
+    }
 
 actual object P2pStreamingEngine {
     private data class EngineConfigurationKey(

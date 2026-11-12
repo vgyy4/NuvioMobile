@@ -1,0 +1,171 @@
+name: iOS 15 Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci-ios-build
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios15-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned iOS 15 IPA
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+      IOS_CONFIGURATION: Release
+      KOTLIN_DAEMON_JVMARGS: -Xmx2048M
+      NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
+      NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
+      NUVIO_ENGINE_ROOT: ${{ github.workspace }}/nuvio-engine
+      RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
+
+    steps:
+      - name: Check out NuvioMobile
+        uses: actions/checkout@v4
+        with:
+          path: NuvioMobile
+
+      # `submodules: recursive` fails upstream: the tree has an orphan
+      # `libass-android` gitlink with no .gitmodules entry (Android-only).
+      # iOS only needs MPVKit, so initialise that one recursively.
+      - name: Initialise MPVKit submodule
+        working-directory: NuvioMobile
+        run: git submodule update --init --recursive MPVKit
+
+      - name: Check out nuvio-engine
+        uses: actions/checkout@v4
+        with:
+          repository: vgyy4/nuvio-engine
+          ref: ios15-deployment-target
+          path: nuvio-engine
+
+      - name: Select newest Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          xcodebuild -version
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "Selecting ${newest}"
+          sudo xcode-select -s "${newest}/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja ripgrep
+          perl -MText::Template -e 1 || sudo cpan -T Text::Template
+
+      - name: Resolve engine revision
+        id: engine-rev
+        run: echo "sha=$(git -C nuvio-engine rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache NuvioEngine.xcframework
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: nuvio-engine/platform/apple/NuvioEngine.xcframework
+          key: engine-xcframework-${{ runner.os }}-${{ runner.arch }}-${{ steps.engine-rev.outputs.sha }}
+
+      - name: Build NuvioEngine.xcframework (iOS 15.0)
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        working-directory: nuvio-engine
+        run: |
+          set -o pipefail
+          # Source downloads (GitHub releases) intermittently return 504; the
+          # scripts skip already-downloaded archives, so retrying is safe.
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if NUVIO_BUILD_JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-apple-xcframework.sh; then
+              break
+            fi
+            [[ "${attempt}" == 8 ]] && exit 1
+            echo "Attempt ${attempt} failed; retrying in $((attempt * 60))s"
+            sleep $((attempt * 60))
+          done
+          ./scripts/verify-apple-xcframework.sh
+          ./scripts/smoke-apple-xcframework.sh
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: NuvioMobile
+          cache-read-only: false
+
+      - name: Cache Kotlin Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/gradle/libs.versions.toml') }}
+          restore-keys: |
+            konan-${{ runner.os }}-${{ runner.arch }}-
+
+      # Gradle requires local.properties to exist. Upstream supplies it from a
+      # secret; without one the file is empty and all runtime keys (Supabase,
+      # TMDB, Sentry) default to blank.
+      - name: Configure runtime properties
+        working-directory: NuvioMobile
+        run: |
+          if [[ -n "${RELEASE_PROPERTIES_BASE64}" ]]; then
+            printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
+            sed -i '' -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          else
+            : > local.properties
+          fi
+
+      - name: Prepare iOS dependencies
+        working-directory: NuvioMobile
+        run: ./scripts/prepare-ios-dependencies.sh
+
+      # The hosted runners' newest SDK predates the iOS 27.1 APIs used behind
+      # `#available(iOS 27.1, *)`, so exclude that code from this build.
+      - name: Build unsigned IPA
+        working-directory: NuvioMobile
+        run: |
+          set -o pipefail
+          echo 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) NUVIO_NO_IOS27_SDK' > "${RUNNER_TEMP}/ci.xcconfig"
+          export XCODE_XCCONFIG_FILE="${RUNNER_TEMP}/ci.xcconfig"
+          mkdir -p "${GITHUB_WORKSPACE}/logs"
+          ./scripts/build-ios-ipa.sh 2>&1 | tee "${GITHUB_WORKSPACE}/logs/build-ios-ipa.log"
+
+      - name: Verify MinimumOSVersion is 15.0
+        working-directory: NuvioMobile
+        run: |
+          app_path="$(find build -type d -name Nuvio.app -path '*-iphoneos/*' -print -quit)"
+          test -n "${app_path}" || { echo "Nuvio.app not found" >&2; exit 1; }
+          minimum="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "${app_path}/Info.plist")"
+          echo "MinimumOSVersion=${minimum}"
+          echo "MinimumOSVersion: ${minimum}" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${minimum}" != "15.0" ]]; then
+            echo "Expected MinimumOSVersion 15.0 but found ${minimum}" >&2
+            exit 1
+          fi
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-ios15-unsigned-ipa
+          path: NuvioMobile/build/ios-ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios15-build-logs
+          path: |
+            logs/
+            nuvio-engine/platform/apple/build/*/*.log
+          if-no-files-found: warn
