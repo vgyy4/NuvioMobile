@@ -148,9 +148,18 @@ actual fun PlatformPlayerSurface(
                 bridge.setMuted(muted)
             }
 
+            // The revision is read before the tracks so a refresh racing with the rebuild only
+            // costs one extra rebuild on the next call.
+            private var cachedAudioTracksRevision = -1
+            private var cachedAudioTracks: List<AudioTrack> = emptyList()
+            private var cachedSubtitleTracksRevision = -1
+            private var cachedSubtitleTracks: List<SubtitleTrack> = emptyList()
+
             override fun getAudioTracks(): List<AudioTrack> {
+                val revision = bridge.getTrackRevision()
+                if (revision == cachedAudioTracksRevision) return cachedAudioTracks
                 val count = bridge.getAudioTrackCount()
-                return (0 until count).map { i ->
+                val tracks = (0 until count).map { i ->
                     AudioTrack(
                         index = bridge.getAudioTrackIndex(i),
                         id = bridge.getAudioTrackId(i),
@@ -159,9 +168,14 @@ actual fun PlatformPlayerSurface(
                         isSelected = bridge.isAudioTrackSelected(i),
                     )
                 }
+                cachedAudioTracks = tracks
+                cachedAudioTracksRevision = revision
+                return tracks
             }
 
             override fun getSubtitleTracks(): List<SubtitleTrack> {
+                val revision = bridge.getTrackRevision()
+                if (revision == cachedSubtitleTracksRevision) return cachedSubtitleTracks
                 val count = bridge.getSubtitleTrackCount()
                 val tracks = (0 until count).map { i ->
                     val trackId = bridge.getSubtitleTrackId(i)
@@ -181,6 +195,8 @@ actual fun PlatformPlayerSurface(
                     )
                 }
                 Logger.d(TAG) { "getSubtitleTracks: found ${tracks.size} tracks" }
+                cachedSubtitleTracks = tracks
+                cachedSubtitleTracksRevision = revision
                 return tracks
             }
 
