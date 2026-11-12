@@ -23,6 +23,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.setValue
@@ -30,15 +33,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.offset
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import org.jetbrains.compose.resources.DrawableResource
@@ -118,7 +125,7 @@ fun NuvioNavigationBar(
     compactSize: Boolean = false,
     content: @Composable NuvioNavigationBarScope.() -> Unit,
 ) {
-    val labelFraction by animateFloatAsState(
+    val labelFraction = animateFloatAsState(
         targetValue = scrollState?.labelVisibility ?: 1f,
         animationSpec = tween(
             durationMillis = NuvioTokens.Motion.sheetEnterMillis,
@@ -127,10 +134,10 @@ fun NuvioNavigationBar(
         label = "nav_label_alpha",
     )
 
-    // Dynamic horizontal padding: pill shrinks when labels are hidden — driven by same labelFraction
+    // Dynamic horizontal padding: pill shrinks when labels are hidden — driven by same labelFraction.
+    // Applied while measuring, so the animation does not recompose the bar and its items.
     val expandedHorizontalPadding = 28.dp
     val collapsedHorizontalPadding = 58.dp
-    val horizontalPadding = expandedHorizontalPadding + (collapsedHorizontalPadding - expandedHorizontalPadding) * (1f - labelFraction)
 
     // Outer container — no background, just safe padding
     Box(
@@ -141,7 +148,18 @@ fun NuvioNavigationBar(
     ) {
         // The floating pill
         val pillModifier = Modifier
-            .padding(horizontal = horizontalPadding)
+            .layout { measurable, constraints ->
+                val horizontalPadding = expandedHorizontalPadding +
+                    (collapsedHorizontalPadding - expandedHorizontalPadding) * (1f - labelFraction.value)
+                val padding = horizontalPadding.roundToPx()
+                val placeable = measurable.measure(constraints.offset(horizontal = -2 * padding))
+                layout(
+                    (placeable.width + 2 * padding).coerceIn(constraints.minWidth, constraints.maxWidth),
+                    placeable.height,
+                ) {
+                    placeable.placeRelative(padding, 0)
+                }
+            }
             .fillMaxWidth()
             .clip(RoundedCornerShape(NuvioTokens.Radius.full))
             .then(
@@ -209,7 +227,7 @@ interface NuvioNavigationBarScope {
 
 private class NuvioNavigationBarScopeImpl(
     private val rowScope: androidx.compose.foundation.layout.RowScope,
-    private val labelFraction: Float,
+    private val labelFraction: State<Float>,
     private val compactSize: Boolean,
 ) : NuvioNavigationBarScope {
     private val iconSize = if (compactSize) 24.dp else 28.dp
@@ -226,12 +244,12 @@ private class NuvioNavigationBarScopeImpl(
     ) {
         val tokens = MaterialTheme.nuvio
         val palette = MaterialTheme.themePalette
-        val iconColor by animateColorAsState(
+        val iconColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent else tokens.colors.textMuted,
             label = "nav_icon_color",
         )
         // Selected item gets a pill-shaped highlight using accent at low opacity
-        val selectedBgColor by animateColorAsState(
+        val selectedBgColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent.copy(alpha = NuvioTokens.Opacity.selected)
             else Color.Transparent,
             label = "nav_bg_color",
@@ -242,7 +260,8 @@ private class NuvioNavigationBarScopeImpl(
                 modifier = modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
-                    .background(selectedBgColor)
+                    // Drawn, not composed: the colour animates without recomposing the item.
+                    .drawBehind { drawRect(selectedBgColor.value) }
                     .selectable(
                         selected = selected,
                         enabled = true,
@@ -258,7 +277,7 @@ private class NuvioNavigationBarScopeImpl(
                         .then(if (selected) Modifier.gradientMask(palette.accentBrush()) else Modifier),
                     imageVector = icon,
                     contentDescription = contentDescription,
-                    tint = if (selected) Color.White else iconColor,
+                    tint = if (selected) Color.White else iconColor.value,
                 )
                 NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize)
             }
@@ -276,11 +295,11 @@ private class NuvioNavigationBarScopeImpl(
     ) {
         val tokens = MaterialTheme.nuvio
         val palette = MaterialTheme.themePalette
-        val iconColor by animateColorAsState(
+        val iconColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent else tokens.colors.textMuted,
             label = "nav_icon_color",
         )
-        val selectedBgColor by animateColorAsState(
+        val selectedBgColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent.copy(alpha = NuvioTokens.Opacity.selected)
             else Color.Transparent,
             label = "nav_bg_color",
@@ -291,7 +310,8 @@ private class NuvioNavigationBarScopeImpl(
                 modifier = modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
-                    .background(selectedBgColor)
+                    // Drawn, not composed: the colour animates without recomposing the item.
+                    .drawBehind { drawRect(selectedBgColor.value) }
                     .selectable(
                         selected = selected,
                         enabled = true,
@@ -307,7 +327,7 @@ private class NuvioNavigationBarScopeImpl(
                         .then(if (selected) Modifier.gradientMask(palette.accentBrush()) else Modifier),
                     painter = painterResource(icon),
                     contentDescription = contentDescription,
-                    tint = if (selected) Color.White else iconColor,
+                    tint = if (selected) Color.White else iconColor.value,
                 )
                 NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize)
             }
@@ -323,12 +343,12 @@ private class NuvioNavigationBarScopeImpl(
         content: @Composable () -> Unit,
     ) {
         val tokens = MaterialTheme.nuvio
-        val selectedBgColor by animateColorAsState(
+        val selectedBgColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent.copy(alpha = NuvioTokens.Opacity.selected)
             else Color.Transparent,
             label = "nav_bg_color",
         )
-        val iconColor by animateColorAsState(
+        val iconColor = animateColorAsState(
             targetValue = if (selected) tokens.colors.accent else tokens.colors.textMuted,
             label = "nav_icon_color",
         )
@@ -338,7 +358,8 @@ private class NuvioNavigationBarScopeImpl(
                 modifier = modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
-                    .background(selectedBgColor)
+                    // Drawn, not composed: the colour animates without recomposing the item.
+                    .drawBehind { drawRect(selectedBgColor.value) }
                     .selectable(
                         selected = selected,
                         enabled = true,
@@ -362,17 +383,30 @@ private class NuvioNavigationBarScopeImpl(
 @Composable
 private fun NavItemLabel(
     label: String?,
-    labelFraction: Float,
-    iconColor: Color,
+    labelFraction: State<Float>,
+    iconColor: State<Color>,
     selected: Boolean,
     compactSize: Boolean,
 ) {
-    if (label == null || labelFraction <= 0f) return
-    Spacer(modifier = Modifier.height((if (compactSize) 2.dp else NuvioTokens.Space.s3) * labelFraction))
+    if (label == null) return
+    val visible by remember(labelFraction) { derivedStateOf { labelFraction.value > 0f } }
+    if (!visible) return
+    val gap = if (compactSize) 2.dp else NuvioTokens.Space.s3
+    // The label grows and fades in the layout/draw phases, so the animation does not recompose.
     Box(
         modifier = Modifier
-            .height(NuvioTokens.Space.s14 * labelFraction)
-            .alpha(labelFraction),
+            .layout { measurable, constraints ->
+                val fraction = labelFraction.value
+                val gapPx = (gap * fraction).roundToPx()
+                val heightPx = (NuvioTokens.Space.s14 * fraction).roundToPx()
+                val placeable = measurable.measure(
+                    constraints.copy(minHeight = 0, maxHeight = heightPx),
+                )
+                layout(placeable.width, gapPx + heightPx) {
+                    placeable.placeRelative(0, gapPx)
+                }
+            }
+            .graphicsLayer { alpha = labelFraction.value },
     ) {
         Text(
             text = label,
@@ -381,7 +415,7 @@ private fun NavItemLabel(
                 lineHeight = NuvioTokens.LineHeight.labelXs,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             ),
-            color = iconColor,
+            color = iconColor.value,
             maxLines = 1,
             overflow = TextOverflow.Clip,
         )
