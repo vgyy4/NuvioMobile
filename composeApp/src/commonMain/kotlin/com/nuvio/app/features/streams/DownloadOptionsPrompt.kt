@@ -29,7 +29,7 @@ import org.jetbrains.compose.resources.stringResource
  */
 internal class DownloadOptionsPrompt(
     val subtitleLanguageCodes: List<String>,
-    /** Languages ticked when the dialog opens: everything except what was unticked last time. */
+    /** Languages ticked when the dialog opens: what was ticked last time (everything on the first run). */
     val initiallySelected: Set<String> = subtitleLanguageCodes.toSet(),
     val answer: CompletableDeferred<List<String>?> = CompletableDeferred(),
 )

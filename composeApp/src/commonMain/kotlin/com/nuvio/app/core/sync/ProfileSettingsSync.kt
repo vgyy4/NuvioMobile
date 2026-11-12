@@ -195,7 +195,7 @@ object ProfileSettingsSync {
             CardDepthStyleRepository.uiState.map { "card_depth_style" },
             PlayerSettingsRepository.uiState.map { "player" },
             StreamBadgeSettingsRepository.uiState.map { "stream_badges" },
-            DownloadsRepository.deselectedSubtitleLanguages.map { "download_subtitle_languages" },
+            DownloadsRepository.selectedSubtitleLanguages.map { "download_subtitle_languages" },
             DebridSettingsRepository.uiState.map { "debrid" },
             TmdbSettingsRepository.uiState.map { "tmdb" },
             MdbListSettingsRepository.uiState.map { "mdblist" },
@@ -252,7 +252,8 @@ object ProfileSettingsSync {
                     PlayerSettingsStorage.exportToSyncPayload(),
                 ),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
-                downloadSubtitleDeselectedLanguages = DownloadsRepository.deselectedSubtitleLanguages.value.toList().sorted(),
+                // Only the ticked languages are written; the legacy "deselected" field is left to older versions.
+                downloadSubtitleLanguages = DownloadsRepository.selectedSubtitleLanguages.value?.toList()?.sorted(),
                 debridSettings = withoutProfileCredentials(
                     PROFILE_DEBRID_SETTINGS_FEATURE,
                     DebridSettingsStorage.exportToSyncPayload(),
@@ -311,8 +312,12 @@ object ProfileSettingsSync {
         StreamBadgeSettingsStorage.replaceFromSyncPayload(blob.features.streamBadgeSettings)
         StreamBadgeSettingsRepository.onProfileChanged()
 
-        // Absent in blobs written by older versions: keep the local choice then.
-        blob.features.downloadSubtitleDeselectedLanguages?.let(DownloadsRepository::replaceDeselectedSubtitleLanguages)
+        // Absent in blobs written by older versions: keep the local choice then. Blobs from older
+        // versions only carry the legacy list of unticked languages, used as a fallback.
+        DownloadsRepository.replaceSelectedSubtitleLanguages(
+            languages = blob.features.downloadSubtitleLanguages,
+            legacyDeselected = blob.features.downloadSubtitleDeselectedLanguages,
+        )
 
         DebridSettingsStorage.replaceFromSyncPayload(
             preservingLocalProfileCredentials(
@@ -401,6 +406,9 @@ private data class MobileProfileSettingsFeatures(
     @SerialName("card_depth_style_settings_payload") val cardDepthStyleSettingsPayload: String = "",
     @SerialName("player_settings") val playerSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("stream_badge_settings") val streamBadgeSettings: JsonObject = JsonObject(emptyMap()),
+    // Ticked download subtitle languages (null = nothing saved yet).
+    @SerialName("download_subtitle_languages") val downloadSubtitleLanguages: List<String>? = null,
+    // Legacy: unticked languages written by older versions. Read-only fallback.
     @SerialName("download_subtitle_deselected_languages") val downloadSubtitleDeselectedLanguages: List<String>? = null,
     @SerialName("debrid_settings") val debridSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("tmdb_settings") val tmdbSettings: JsonObject = JsonObject(emptyMap()),

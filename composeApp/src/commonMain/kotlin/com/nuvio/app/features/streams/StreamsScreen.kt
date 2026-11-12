@@ -201,10 +201,9 @@ fun StreamsScreen(
         val chosenSubtitles: List<String> = if (available.isEmpty()) {
             emptyList()
         } else {
-            val deselected = DownloadsRepository.deselectedSubtitleLanguages.value
             val prompt = DownloadOptionsPrompt(
                 subtitleLanguageCodes = available,
-                initiallySelected = available.filter { it !in deselected }.toSet(),
+                initiallySelected = DownloadsRepository.initialSubtitleSelection(available),
             )
             optionsPrompt = prompt
             val answer = try {
