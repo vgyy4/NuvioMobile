@@ -10,10 +10,10 @@ import com.nuvio.app.features.p2p.P2pStreamingEngine
 import com.nuvio.app.features.p2p.buildP2pMagnetUri
 import com.nuvio.app.features.p2p.formatP2pMegabytes
 import com.nuvio.app.features.player.SubtitleRequestExtras
-import com.nuvio.app.features.player.loadAddonSubtitles
-import com.nuvio.app.features.player.normalizeLanguageCode
 import com.nuvio.app.features.player.addonSubtitleRequests
+import com.nuvio.app.features.player.computeVideoHash
 import com.nuvio.app.features.streams.StreamItem
+import com.nuvio.app.features.streams.StreamSubtitle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +57,11 @@ object DownloadsRepository {
 
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
+
+    // Subtitles found by the last previews (newest last), so the download uses exactly the list
+    // the user chose from instead of asking the add-ons a second time. Updated atomically because
+    // season downloads queue episodes from another thread.
+    private val previewedSubtitles = MutableStateFlow<Map<String, PreviewedSubtitles>>(emptyMap())
 
     private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
     private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -148,8 +153,9 @@ object DownloadsRepository {
     }
 
     /**
-     * The languages of the subtitles that [stream] offers (its own and the add-ons'). Empty when
-     * there is nothing to download.
+     * The language keys of the subtitles that [stream] offers (its own and the add-ons'), looked up
+     * the way the player does (same add-on requests, with the video hash when it can be computed)
+     * and grouped like the player's subtitle picker. Empty when there is nothing to download.
      */
     suspend fun previewSubtitleLanguages(
         contentType: String,
@@ -157,18 +163,47 @@ object DownloadsRepository {
         stream: StreamItem,
     ): List<String> {
         ensureLoaded()
-        val extras = if (stream.playableDirectUrl == null) {
+        var extras = subtitleRequestExtras(stream, stream.playableDirectUrl)
+        val directUrl = stream.playableDirectUrl?.trim()
+        if (extras?.videoHash == null && directUrl != null && directUrl.isHttpUrl()) {
+            // Like the player: look subtitles up with the OpenSubtitles hash of the video if possible.
+            val hashed = try {
+                withTimeoutOrNull(SUBTITLE_HASH_TIMEOUT_MS) {
+                    computeVideoHash(directUrl, sanitizeRequestHeaders(stream.behaviorHints.proxyHeaders?.request))
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                null
+            }
+            if (hashed != null) {
+                extras = (extras ?: SubtitleRequestExtras()).copy(
+                    videoHash = hashed.first,
+                    videoSize = extras?.videoSize ?: hashed.second,
+                )
+            }
+        }
+        val found = DownloadSubtitles.discover(
+            requests = addonSubtitleRequests(type = contentType, videoId = videoId, extras = extras),
+            streamSubtitles = stream.externalSubtitles,
+        )
+        val key = previewKey(contentType, videoId, stream)
+        val previewed = PreviewedSubtitles(extras, found.subtitles, found.fromAddons)
+        previewedSubtitles.update { current ->
+            (current - key + (key to previewed)).toList().takeLast(MAX_PREVIEWED_SUBTITLES).toMap()
+        }
+        return subtitleLanguageKeys(found.subtitles)
+    }
+
+    private fun previewKey(contentType: String, videoId: String, stream: StreamItem): String =
+        "$contentType|$videoId|${stream.playableDirectUrl?.trim() ?: stream.p2pInfoHash}"
+
+    // The extras the player sends to subtitle add-ons for a stream: a torrent has no playback URL.
+    private fun subtitleRequestExtras(stream: StreamItem, sourceUrl: String?): SubtitleRequestExtras? =
+        if (sourceUrl == null) {
             SubtitleRequestExtras.from(stream.behaviorHints)
         } else {
-            SubtitleRequestExtras.from(stream.behaviorHints, stream.playableDirectUrl)
+            SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl)
         }
-        val addonLanguages = loadAddonSubtitles(
-            addonSubtitleRequests(type = contentType, videoId = videoId, extras = extras),
-        ).map { it.language }
-        return (stream.externalSubtitles.map { it.language } + addonLanguages)
-            .mapNotNull(::normalizeLanguageCode)
-            .distinct()
-    }
 
     fun findPlayableDownloadByVideoId(videoId: String?): DownloadItem? {
         ensureLoaded()
@@ -306,6 +341,10 @@ object DownloadsRepository {
             downloadId = downloadId,
         )
 
+        val previewId = previewKey(contentType, videoId, stream)
+        val previewed = previewedSubtitles.value[previewId]
+        if (previewed != null) previewedSubtitles.update { it - previewId }
+
         val item = DownloadItem(
             id = downloadId,
             contentType = contentType,
@@ -327,16 +366,22 @@ object DownloadsRepository {
             sourceUrl = sourceUrl,
             sourceHeaders = sanitizeRequestHeaders(stream.behaviorHints.proxyHeaders?.request),
             sourceResponseHeaders = sanitizeResponseHeaders(stream.behaviorHints.proxyHeaders?.response),
-            subtitleRequests = addonSubtitleRequests(
-                type = contentType,
-                videoId = videoId,
-                extras = if (p2pInfoHash != null) {
-                    SubtitleRequestExtras.from(stream.behaviorHints)
-                } else {
-                    SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl)
-                },
-            ),
-            sourceSubtitles = stream.externalSubtitles,
+            subtitleRequests = if (previewed?.fromAddons == true) {
+                // The add-on results are saved below; nothing left to ask them.
+                emptyList()
+            } else {
+                addonSubtitleRequests(
+                    type = contentType,
+                    videoId = videoId,
+                    extras = previewed?.extras
+                        ?: subtitleRequestExtras(stream, if (p2pInfoHash != null) null else sourceUrl),
+                )
+            },
+            sourceSubtitles = if (previewed != null) {
+                filterSubtitlesByLanguages(previewed.subtitles, subtitleLanguages)
+            } else {
+                stream.externalSubtitles
+            },
             downloadSubtitles = downloadSubtitles,
             subtitleLanguages = subtitleLanguages,
             p2pInfoHash = p2pInfoHash,
@@ -839,6 +884,9 @@ object DownloadsRepository {
 private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
 private const val ORPHAN_SWEEP_DELAY_MS = 20_000L
 private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
+// Computing the video hash reads a few blocks of the file; the subtitle lookup goes on without it.
+private const val SUBTITLE_HASH_TIMEOUT_MS = 8_000L
+private const val MAX_PREVIEWED_SUBTITLES = 8
 
 private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
     var job: Job? = null
@@ -910,8 +958,15 @@ private object DownloadsCodec {
         )
 }
 
-/** Saved languages are compared by normalized code, so different spellings of one language match. */
-private fun canonicalSubtitleLanguage(language: String): String = normalizeLanguageCode(language) ?: language
+/** Saved languages are stored as the shared language key, so different spellings of one language match. */
+private fun canonicalSubtitleLanguage(language: String): String = downloadSubtitleLanguageKey(language)
+
+/** What [DownloadsRepository.previewSubtitleLanguages] found, kept until the download is queued. */
+private class PreviewedSubtitles(
+    val extras: SubtitleRequestExtras?,
+    val subtitles: List<StreamSubtitle>,
+    val fromAddons: Boolean,
+)
 
 private fun sanitizeRequestHeaders(headers: Map<String, String>?): Map<String, String> =
     headers
@@ -1013,6 +1068,9 @@ private fun String?.fileExtensionFromFileName(): String? {
         .orEmpty()
     return suffix.takeIf { it.length in 2..5 && it.all(Char::isLetterOrDigit) }
 }
+
+private fun String.isHttpUrl(): Boolean =
+    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
 
 private fun String.isSupportedDownloadUrl(): Boolean {
     val normalized = trim().lowercase()
