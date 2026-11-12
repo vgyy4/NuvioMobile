@@ -2,12 +2,19 @@ name: Build Android engine AAR
 
 # Builds the Android Nuvio Engine library from source (vgyy4/nuvio-engine) and commits it to the
 # branch that was dispatched, replacing the prebuilt composeApp/libs/lib-nuvio-engine-android-*.aar.
+# Triggered by changing .github/engine-aar-request (its first line is the engine branch/tag/commit
+# to build), or manually from a branch that has this workflow on the default branch.
 on:
   workflow_dispatch:
     inputs:
       engine_ref:
         description: nuvio-engine branch or tag to build
         default: ccr-perf-9ba47f5b
+  push:
+    branches:
+      - ccr-9ba47f5b-ox81vl
+    paths:
+      - .github/engine-aar-request
 
 permissions:
   contents: write
@@ -25,11 +32,18 @@ jobs:
       - name: Checkout app
         uses: actions/checkout@v4
 
+      - name: Pick the engine ref
+        id: engine
+        run: |
+          REF='${{ inputs.engine_ref }}'
+          if [ -z "$REF" ]; then REF=$(head -n1 .github/engine-aar-request | tr -d '[:space:]'); fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
       - name: Checkout nuvio-engine
         uses: actions/checkout@v4
         with:
           repository: vgyy4/nuvio-engine
-          ref: ${{ inputs.engine_ref }}
+          ref: ${{ steps.engine.outputs.ref }}
           path: nuvio-engine
 
       - name: Set up Java
@@ -68,5 +82,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add composeApp/libs
-          git commit -m "build: Android engine AAR built from nuvio-engine ${{ inputs.engine_ref }}" || exit 0
+          git commit -m "build: Android engine AAR built from nuvio-engine ${{ steps.engine.outputs.ref }}" || exit 0
           git push origin "HEAD:${GITHUB_REF_NAME}"
