@@ -3,6 +3,7 @@ package com.nuvio.app.core.ui
 import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -14,8 +15,15 @@ import androidx.compose.ui.unit.dp
 
 import androidx.compose.ui.graphics.drawscope.clipPath
 
+/**
+ * Provided once at the app root so that every poster card does not start its own collector of the
+ * same flow. Cards outside that scope fall back to collecting it themselves.
+ */
+val LocalCardDepthStyleUiState = compositionLocalOf<CardDepthStyleUiState?> { null }
+
 @Composable
 fun rememberCardDepthStyleUiState(): CardDepthStyleUiState {
+    LocalCardDepthStyleUiState.current?.let { return it }
     CardDepthStyleRepository.ensureLoaded()
     val uiState by CardDepthStyleRepository.uiState.collectAsState()
     return uiState

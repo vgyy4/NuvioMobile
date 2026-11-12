@@ -7,6 +7,7 @@ import com.nuvio.app.core.network.SupabaseProvider
 import com.nuvio.app.features.collection.CollectionMobileSettingsRepository
 import com.nuvio.app.features.collection.CollectionMobileSettingsStorage
 import com.nuvio.app.features.debrid.DebridSettingsRepository
+import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.debrid.DebridSettingsStorage
 import com.nuvio.app.features.details.MetaScreenSettingsStorage
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
@@ -194,6 +195,7 @@ object ProfileSettingsSync {
             CardDepthStyleRepository.uiState.map { "card_depth_style" },
             PlayerSettingsRepository.uiState.map { "player" },
             StreamBadgeSettingsRepository.uiState.map { "stream_badges" },
+            DownloadsRepository.deselectedSubtitleLanguages.map { "download_subtitle_languages" },
             DebridSettingsRepository.uiState.map { "debrid" },
             TmdbSettingsRepository.uiState.map { "tmdb" },
             MdbListSettingsRepository.uiState.map { "mdblist" },
@@ -250,6 +252,7 @@ object ProfileSettingsSync {
                     PlayerSettingsStorage.exportToSyncPayload(),
                 ),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
+                downloadSubtitleDeselectedLanguages = DownloadsRepository.deselectedSubtitleLanguages.value.toList().sorted(),
                 debridSettings = withoutProfileCredentials(
                     PROFILE_DEBRID_SETTINGS_FEATURE,
                     DebridSettingsStorage.exportToSyncPayload(),
@@ -308,6 +311,9 @@ object ProfileSettingsSync {
         StreamBadgeSettingsStorage.replaceFromSyncPayload(blob.features.streamBadgeSettings)
         StreamBadgeSettingsRepository.onProfileChanged()
 
+        // Absent in blobs written by older versions: keep the local choice then.
+        blob.features.downloadSubtitleDeselectedLanguages?.let(DownloadsRepository::replaceDeselectedSubtitleLanguages)
+
         DebridSettingsStorage.replaceFromSyncPayload(
             preservingLocalProfileCredentials(
                 PROFILE_DEBRID_SETTINGS_FEATURE,
@@ -361,6 +367,7 @@ object ProfileSettingsSync {
         CardDepthStyleRepository.ensureLoaded()
         PlayerSettingsRepository.ensureLoaded()
         StreamBadgeSettingsRepository.ensureLoaded()
+        DownloadsRepository.ensureLoaded()
         DebridSettingsRepository.ensureLoaded()
         TmdbSettingsRepository.ensureLoaded()
         MdbListSettingsRepository.ensureLoaded()
@@ -394,6 +401,7 @@ private data class MobileProfileSettingsFeatures(
     @SerialName("card_depth_style_settings_payload") val cardDepthStyleSettingsPayload: String = "",
     @SerialName("player_settings") val playerSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("stream_badge_settings") val streamBadgeSettings: JsonObject = JsonObject(emptyMap()),
+    @SerialName("download_subtitle_deselected_languages") val downloadSubtitleDeselectedLanguages: List<String>? = null,
     @SerialName("debrid_settings") val debridSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("tmdb_settings") val tmdbSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("mdblist_settings") val mdbListSettings: JsonObject = JsonObject(emptyMap()),

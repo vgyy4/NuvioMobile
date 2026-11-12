@@ -44,6 +44,11 @@ object DownloadsRepository {
     private val _uiState = MutableStateFlow(DownloadsUiState())
     val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
 
+    // Subtitle languages the user unticked in the download options. Remembering the unticked ones
+    // (instead of the ticked ones) keeps "everything ticked" the default for languages not seen yet.
+    private val _deselectedSubtitleLanguages = MutableStateFlow<Set<String>>(emptySet())
+    val deselectedSubtitleLanguages: StateFlow<Set<String>> = _deselectedSubtitleLanguages.asStateFlow()
+
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
@@ -75,8 +80,27 @@ object DownloadsRepository {
         activeHandles.clear()
         hasLoaded = false
         _hasUnseenCompleted.value = false
+        _deselectedSubtitleLanguages.value = emptySet()
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
+    }
+
+    /** Remembers the choice made in the download options: offered but unticked languages. */
+    fun rememberSubtitleSelection(offered: List<String>, ticked: List<String>) {
+        ensureLoaded()
+        val updated = (_deselectedSubtitleLanguages.value - offered.toSet()) + (offered.toSet() - ticked.toSet())
+        if (updated == _deselectedSubtitleLanguages.value) return
+        _deselectedSubtitleLanguages.value = updated
+        persist()
+    }
+
+    /** Applies the choice synced from the cloud for this profile. */
+    fun replaceDeselectedSubtitleLanguages(languages: Collection<String>) {
+        ensureLoaded()
+        val updated = languages.toSet()
+        if (updated == _deselectedSubtitleLanguages.value) return
+        _deselectedSubtitleLanguages.value = updated
+        persist()
     }
 
     /**
@@ -403,10 +427,12 @@ object DownloadsRepository {
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
+            _deselectedSubtitleLanguages.value = emptySet()
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
+        _deselectedSubtitleLanguages.value = DownloadsCodec.decodeDeselectedLanguages(payload)
 
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
@@ -726,7 +752,7 @@ object DownloadsRepository {
 
     private fun persist() {
         DownloadsStorage.savePayload(
-            DownloadsCodec.encodeItems(_uiState.value.items),
+            DownloadsCodec.encode(_uiState.value.items, _deselectedSubtitleLanguages.value),
         )
     }
 
@@ -790,6 +816,7 @@ private sealed interface P2pDownloadOutcome {
 @Serializable
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
+    val deselectedSubtitleLanguages: List<String> = emptyList(),
 )
 
 private object DownloadsCodec {
@@ -803,10 +830,16 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).items
         }.getOrDefault(emptyList())
 
-    fun encodeItems(items: Collection<DownloadItem>): String =
+    fun decodeDeselectedLanguages(payload: String): Set<String> =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).deselectedSubtitleLanguages.toSet()
+        }.getOrDefault(emptySet())
+
+    fun encode(items: Collection<DownloadItem>, deselectedSubtitleLanguages: Set<String>): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
+                deselectedSubtitleLanguages = deselectedSubtitleLanguages.toList().sorted(),
             ),
         )
 }

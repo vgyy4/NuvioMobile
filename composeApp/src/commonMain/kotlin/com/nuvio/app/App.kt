@@ -12,6 +12,8 @@ import coil3.request.CachePolicy
 import coil3.request.crossfade
 import coil3.svg.SvgDecoder
 import com.nuvio.app.core.poster.CustomPosterFallbackInterceptor
+import com.nuvio.app.core.ui.CardDepthStyleRepository
+import com.nuvio.app.core.ui.LocalCardDepthStyleUiState
 import com.nuvio.app.core.ui.NativeProfileSwitcherController
 import com.nuvio.app.core.ui.NuvioTheme
 import com.nuvio.app.core.ui.configurePlatformImageLoader
@@ -99,7 +101,14 @@ internal fun AppEnvironment(content: @Composable () -> Unit) {
 
     val customThemeColors by ThemeSettingsRepository.customThemeColors.collectAsStateWithLifecycle()
 
+    val cardDepthStyle by remember {
+        CardDepthStyleRepository.ensureLoaded()
+        CardDepthStyleRepository.uiState
+    }.collectAsStateWithLifecycle()
+
     NuvioTheme(appTheme = selectedTheme, amoled = amoledEnabled, customThemeColors = customThemeColors) {
-        content()
+        androidx.compose.runtime.CompositionLocalProvider(LocalCardDepthStyleUiState provides cardDepthStyle) {
+            content()
+        }
     }
 }

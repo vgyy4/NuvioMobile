@@ -201,7 +201,11 @@ fun StreamsScreen(
         val chosenSubtitles: List<String> = if (available.isEmpty()) {
             emptyList()
         } else {
-            val prompt = DownloadOptionsPrompt(available)
+            val deselected = DownloadsRepository.deselectedSubtitleLanguages.value
+            val prompt = DownloadOptionsPrompt(
+                subtitleLanguageCodes = available,
+                initiallySelected = available.filter { it !in deselected }.toSet(),
+            )
             optionsPrompt = prompt
             val answer = try {
                 prompt.answer.await()
@@ -210,6 +214,9 @@ fun StreamsScreen(
             }
             // Dismissing the question cancels the download.
             answer ?: return@async false
+        }
+        if (available.isNotEmpty()) {
+            DownloadsRepository.rememberSubtitleSelection(offered = available, ticked = chosenSubtitles)
         }
 
         val result = DownloadsRepository.enqueueFromStream(

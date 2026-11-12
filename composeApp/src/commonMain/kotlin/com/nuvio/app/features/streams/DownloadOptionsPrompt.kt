@@ -29,13 +29,14 @@ import org.jetbrains.compose.resources.stringResource
  */
 internal class DownloadOptionsPrompt(
     val subtitleLanguageCodes: List<String>,
+    /** Languages ticked when the dialog opens: everything except what was unticked last time. */
+    val initiallySelected: Set<String> = subtitleLanguageCodes.toSet(),
     val answer: CompletableDeferred<List<String>?> = CompletableDeferred(),
 )
 
 @Composable
 internal fun DownloadOptionsDialog(prompt: DownloadOptionsPrompt) {
-    // Everything is selected by default.
-    var selected by remember(prompt) { mutableStateOf(prompt.subtitleLanguageCodes.toSet()) }
+    var selected by remember(prompt) { mutableStateOf(prompt.initiallySelected) }
     DialogSurface(
         onDismissRequest = { prompt.answer.complete(null) },
         modifier = Modifier.heightIn(max = 560.dp),
