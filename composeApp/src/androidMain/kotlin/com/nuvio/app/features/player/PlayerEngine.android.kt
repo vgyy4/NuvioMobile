@@ -1447,7 +1447,7 @@ private fun LibmpvPlayerSurface(
                 if (property == "sub-text" || property == "sid") view.updateStyledSubtitle()
             }
             override fun eventProperty(property: String, value: Double) {
-                if (property == "duration" || property == "time-pos" || property == "speed") {
+                if (property == "duration" || property == "speed") {
                     dispatchSnapshot()
                 }
             }
@@ -1734,8 +1734,6 @@ private class NuvioLibmpvView(
             "seeking" to MPV.mpvFormat.MPV_FORMAT_FLAG,
             "cache-buffering-state" to MPV.mpvFormat.MPV_FORMAT_INT64,
             "duration" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
-            "time-pos" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
-            "demuxer-cache-time" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
             "speed" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
             "track-list" to MPV.mpvFormat.MPV_FORMAT_NODE,
             "sid" to MPV.mpvFormat.MPV_FORMAT_INT64,
