@@ -1724,6 +1724,11 @@ private class NuvioLibmpvView(
         // Room above 100% for the player's amplification (+10 dB is about 316%).
         mpv.setOptionString("volume-max", "$LIBMPV_MAX_VOLUME_PERCENT").logIfMpvError("volume-max")
         mpv.setOptionString("vd-lavc-film-grain", "cpu")
+        if (lowRamDevice) {
+            // Lighter software decode path on low-RAM devices (mirrors the iOS low-memory profile).
+            mpv.setOptionString("vd-lavc-fast", "yes").logIfMpvError("vd-lavc-fast")
+            mpv.setOptionString("vd-lavc-skiploopfilter", "nonref").logIfMpvError("vd-lavc-skiploopfilter")
+        }
         mpv.setPropertyBoolean("keep-open", true)
         mpv.setPropertyBoolean("input-default-bindings", true)
         mpv.setPropertyBoolean("audio-fallback-to-null", true)
