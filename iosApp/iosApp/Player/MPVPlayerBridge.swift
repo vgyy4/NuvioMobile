@@ -1157,7 +1157,8 @@ final class MPVPlayerViewController: UIViewController {
         )
     }
 
-    /// Full state + track refresh — called from MPV event loop on property changes.
+    /// Full state + track refresh — called from the MPV event loop when the track list or the
+    /// selected audio/subtitle track changes, and when a file is loaded.
     func updateState() {
         refreshPlaybackState()
         refreshTracks()
@@ -1390,8 +1391,12 @@ final class MPVPlayerViewController: UIViewController {
                     let name = property?.pointee.name.map { String(cString: $0) }
                     if name == "sub-text" {
                         DispatchQueue.main.async { self.updateStyledSubtitle() }
-                    } else {
+                    } else if name == "track-list" || name == "aid" || name == "sid" {
                         DispatchQueue.main.async { self.updateState() }
+                    } else {
+                        // pause, core-idle, seeking, paused-for-cache, eof-reached: the track
+                        // list cannot have changed, so skip re-enumerating it.
+                        DispatchQueue.main.async { self.refreshPlaybackState() }
                     }
                 case MPV_EVENT_FILE_LOADED:
                     DispatchQueue.main.async {
@@ -1411,7 +1416,8 @@ final class MPVPlayerViewController: UIViewController {
                     }
                 case MPV_EVENT_PLAYBACK_RESTART:
                     DispatchQueue.main.async {
-                        self.updateState()
+                        self.refreshPlaybackState()
+                        self.updateStyledSubtitle()
                         self.publishNowPlayingForPlaybackSession()
                         self.syncNowPlayingPlaybackState(isPlaying: self.isPlayerPlaying, force: true)
                     }
