@@ -17,6 +17,7 @@ import com.nuvio.app.navigation.DetailRoute
 import com.nuvio.app.navigation.EntityBrowseRoute
 import com.nuvio.app.navigation.NuvioNavigator
 import com.nuvio.app.navigation.PersonDetailRoute
+import com.nuvio.app.features.streams.SeasonBatchEpisode
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.person_role_creator
@@ -39,6 +40,18 @@ internal typealias ContentPlayAction = (
     episodeThumbnail: String?,
     pauseDescription: String?,
     resumePositionMs: Long?,
+) -> Unit
+
+/** Starts downloading a season: the content, then the episodes to download in order. */
+internal typealias SeasonDownloadAction = (
+    type: String,
+    parentMetaId: String,
+    parentMetaType: String,
+    title: String,
+    logo: String?,
+    poster: String?,
+    background: String?,
+    episodes: List<SeasonBatchEpisode>,
 ) -> Unit
 
 @Composable
@@ -71,6 +84,7 @@ internal fun DetailsDestination(
     onPlay: ContentPlayAction,
     onPlayManually: ContentPlayAction,
     onDownloadSource: ContentPlayAction? = null,
+    onDownloadSeason: SeasonDownloadAction? = null,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
 ) {
@@ -86,6 +100,7 @@ internal fun DetailsDestination(
         onPlay = onPlay,
         onPlayManually = onPlayManually,
         onDownloadSource = onDownloadSource,
+        onDownloadSeason = onDownloadSeason,
         onOpenMeta = onOpenMeta,
         onCastClick = { person, avatarTransitionKey ->
             val tmdbId = person.tmdbId

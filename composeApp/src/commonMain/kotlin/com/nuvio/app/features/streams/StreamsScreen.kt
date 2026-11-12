@@ -73,6 +73,8 @@ import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.core.ui.rememberArtworkBackdrop
 import com.nuvio.app.features.downloads.DownloadEnqueueResult
 import com.nuvio.app.features.downloads.DownloadsRepository
+import com.nuvio.app.features.downloads.SeasonDownloadBatch
+import com.nuvio.app.features.downloads.SeasonDownloadCoordinator
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -123,6 +125,7 @@ fun StreamsScreen(
     manualSelection: Boolean = false,
     startFromBeginning: Boolean = false,
     downloadOnly: Boolean = false,
+    seasonBatch: List<SeasonBatchEpisode> = emptyList(),
     showLoadingScreen: Boolean = false,
     onStreamSelected: (stream: StreamItem, resumePositionMs: Long?, resumeProgressFraction: Float?) -> Unit = { _, _, _ -> },
     onStreamActionOpen: (
@@ -228,7 +231,26 @@ fun StreamsScreen(
             subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
         )
         NuvioToastController.show(result.toastMessage())
-        result == DownloadEnqueueResult.Started || result == DownloadEnqueueResult.Replaced
+        val started = result == DownloadEnqueueResult.Started || result == DownloadEnqueueResult.Replaced
+        if (started && seasonBatch.isNotEmpty()) {
+            // The rest of the season: same release as the one just picked, same subtitle choice.
+            SeasonDownloadCoordinator.start(
+                SeasonDownloadBatch(
+                    contentType = type,
+                    parentMetaId = parentMetaId,
+                    parentMetaType = parentMetaType,
+                    title = title,
+                    logo = logo,
+                    poster = poster,
+                    background = background,
+                    template = target,
+                    downloadSubtitles = chosenSubtitles.isNotEmpty(),
+                    subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
+                    episodes = seasonBatch,
+                ),
+            )
+        }
+        started
     }
 
     optionsPrompt?.let { DownloadOptionsDialog(it) }

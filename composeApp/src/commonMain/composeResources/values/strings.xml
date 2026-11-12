@@ -1708,6 +1708,12 @@
     <string name="streams_copy_link">Copy stream link</string>
     <string name="streams_download_file">Download file</string>
     <string name="download_action_label">Download</string>
+    <string name="season_download_action">Download season</string>
+    <string name="season_download_prompt_title">Download season</string>
+    <string name="season_download_prompt_message">%1$d of %2$d episodes are already watched. Download them too?</string>
+    <string name="season_download_prompt_all">All %1$d episodes</string>
+    <string name="season_download_prompt_unwatched">Unwatched only (%1$d)</string>
+    <string name="season_download_summary">Season download: %1$d started, %2$d without a matching source, %3$d already downloaded</string>
     <string name="download_options_title">Download options</string>
     <string name="download_options_subtitles">Subtitles</string>
     <string name="download_options_subtitles_hint">Choose which languages to download with the video</string>
