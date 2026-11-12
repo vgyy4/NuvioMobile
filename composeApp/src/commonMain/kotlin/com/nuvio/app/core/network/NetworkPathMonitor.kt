@@ -7,7 +7,8 @@ package com.nuvio.app.core.network
 internal expect object NetworkPathMonitor {
     /**
      * Starts listening (once). [onChange] receives `true` when some network is available and
-     * `false` when none is. It is called once with the current state right after starting.
+     * `false` when none is, normally once right away with the current state. Returns false when
+     * the system listener could not be set up, so the caller can use a fallback.
      */
-    fun start(onChange: (connected: Boolean) -> Unit)
+    fun start(onChange: (connected: Boolean) -> Unit): Boolean
 }
