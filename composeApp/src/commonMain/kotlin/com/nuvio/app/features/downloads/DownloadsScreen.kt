@@ -1,15 +1,11 @@
 package com.nuvio.app.features.downloads
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -42,8 +38,17 @@ import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.core.ui.posterCardClickable
+import com.nuvio.app.features.home.components.HomeContinueWatchingSection
+import com.nuvio.app.features.home.components.HomeContinueWatchingSectionBottomPadding
 import com.nuvio.app.features.home.rememberCachedHomeContinueWatchingItems
+import com.nuvio.app.features.tracking.WatchProgressSource
+import com.nuvio.app.features.watched.WatchedRepository
+import com.nuvio.app.features.watchprogress.ContinueWatchingItem
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
+import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesUiState
+import com.nuvio.app.features.watchprogress.WatchProgressRepository
+import com.nuvio.app.features.watchprogress.continueWatchingItemKey
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
@@ -71,12 +76,24 @@ fun DownloadsScreen(
         ContinueWatchingPreferencesRepository.ensureLoaded()
         ContinueWatchingPreferencesRepository.uiState
     }.collectAsStateWithLifecycle()
+    val watchProgressUiState by remember {
+        WatchProgressRepository.ensureLoaded()
+        WatchProgressRepository.uiState
+    }.collectAsStateWithLifecycle()
+    val watchedUiState by remember {
+        WatchedRepository.ensureLoaded()
+        WatchedRepository.uiState
+    }.collectAsStateWithLifecycle()
+    val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
     val continueEntries = remember(uiState.completedItems, homeContinueWatching, continueWatchingPreferences.isVisible) {
         if (continueWatchingPreferences.isVisible) {
             downloadedContinueWatchingEntries(homeContinueWatching, uiState.completedItems)
         } else {
             emptyList()
         }
+    }
+    val continueByKey = remember(continueEntries) {
+        continueEntries.associateBy { entry -> continueWatchingItemKey(entry.item) }
     }
 
     var selectedShowId by rememberSaveable(initialShowId) { mutableStateOf(initialShowId) }
@@ -91,6 +108,8 @@ fun DownloadsScreen(
             .filter { it.isEpisode }
             .sortedForSeriesDownloads()
     }
+    val downloadedMovies = remember(completedItems) { completedItems.toDownloadedMovies() }
+    val downloadedShows = remember(completedItems) { completedItems.toDownloadedShows() }
 
     val selectedShowTitle = remember(selectedShowId, completedEpisodes) {
         selectedShowId?.let { showId ->
@@ -98,7 +117,7 @@ fun DownloadsScreen(
         }
     }
 
-    NuvioScreen {
+    NuvioScreen(horizontalPadding = 0.dp) {
         stickyHeader {
             NuvioScreenHeader(
                 title = if (selectedShowId == null) {
@@ -106,6 +125,7 @@ fun DownloadsScreen(
                 } else {
                     selectedShowTitle ?: stringResource(Res.string.downloads_show_downloads)
                 },
+                modifier = Modifier.padding(horizontal = 16.dp),
                 onBack = if (selectedShowId == null && !showBack) {
                     null
                 } else {
@@ -137,11 +157,27 @@ fun DownloadsScreen(
         if (selectedShowId == null) {
             downloadsRootContent(
                 uiState = uiState,
-                continueEntries = continueEntries,
-                onOpenDownload = onOpenDownload,
-                onOpenShow = { showId, title ->
-                    onNavigateToShow?.invoke(showId, title) ?: run { selectedShowId = showId }
+                continueItems = continueEntries.map(DownloadedContinueEntry::item),
+                continuePreferences = continueWatchingPreferences,
+                continueDataSourceKey = watchProgressUiState.source,
+                movies = downloadedMovies,
+                shows = downloadedShows,
+                watchedKeys = watchedUiState.watchedKeys,
+                fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                onContinueClick = { item ->
+                    continueByKey[continueWatchingItemKey(item)]?.let { onOpenDownload(it.download) }
                 },
+                onContinueLongPress = {},
+                onTitleClick = { downloaded ->
+                    if (downloaded.isShow) {
+                        onNavigateToShow?.invoke(downloaded.parentMetaId, downloaded.title)
+                            ?: run { selectedShowId = downloaded.parentMetaId }
+                    } else {
+                        downloaded.downloads.firstOrNull()?.let(onOpenDownload)
+                    }
+                },
+                onTitleLongPress = {},
+                onOpenDownload = onOpenDownload,
                 onDeleteDownload = { downloadPendingDeletionId = it },
             )
         } else {
@@ -149,10 +185,12 @@ fun DownloadsScreen(
                 showId = selectedShowId.orEmpty(),
                 episodes = completedEpisodes,
                 onOpenDownload = onOpenDownload,
+                onEpisodeLongPress = {},
                 onDeleteDownload = { downloadPendingDeletionId = it },
             )
         }
     }
+
 
     val pendingDeletionId = downloadPendingDeletionId
     if (pendingDeletionId != null) {
@@ -174,97 +212,61 @@ fun DownloadsScreen(
 
 private fun LazyListScope.downloadsRootContent(
     uiState: DownloadsUiState,
-    continueEntries: List<DownloadedContinueEntry>,
+    continueItems: List<ContinueWatchingItem>,
+    continuePreferences: ContinueWatchingPreferencesUiState,
+    continueDataSourceKey: WatchProgressSource,
+    movies: List<DownloadedTitle>,
+    shows: List<DownloadedTitle>,
+    watchedKeys: Set<String>,
+    fullyWatchedSeriesKeys: Set<String>,
+    onContinueClick: (ContinueWatchingItem) -> Unit,
+    onContinueLongPress: (ContinueWatchingItem) -> Unit,
+    onTitleClick: (DownloadedTitle) -> Unit,
+    onTitleLongPress: (DownloadedTitle) -> Unit,
     onOpenDownload: (DownloadItem) -> Unit,
-    onOpenShow: (showId: String, title: String) -> Unit,
     onDeleteDownload: (String) -> Unit,
 ) {
     val activeItems = uiState.activeItems
-    val completedMovies = uiState.completedItems.filterNot(DownloadItem::isEpisode)
-    val completedShows = uiState.completedItems
-        .filter(DownloadItem::isEpisode)
-        .groupBy { it.parentMetaId }
-        .mapNotNull { (_, episodes) ->
-            episodes.firstOrNull()?.let { first ->
-                first to episodes
-            }
-        }
-        .sortedBy { (item, _) -> item.title.lowercase() }
 
-    if (continueEntries.isNotEmpty()) {
-        item {
-            SectionTitle(stringResource(Res.string.downloads_section_continue_watching))
-        }
-        item {
-            DownloadsContinueWatchingRow(entries = continueEntries, onOpen = onOpenDownload)
+    if (continueItems.isNotEmpty()) {
+        item(key = "downloads-continue-watching") {
+            // Home's own section: Card, Wide or Poster style and the thumbnail/blur options are the user's.
+            HomeContinueWatchingSection(
+                items = continueItems,
+                style = continuePreferences.style,
+                dataSourceKey = continueDataSourceKey,
+                useEpisodeThumbnails = continuePreferences.useEpisodeThumbnails,
+                blurNextUp = continuePreferences.blurNextUp,
+                modifier = Modifier.padding(bottom = HomeContinueWatchingSectionBottomPadding),
+                title = stringResource(Res.string.downloads_section_continue_watching),
+                onItemClick = onContinueClick,
+                onItemLongPress = onContinueLongPress,
+            )
         }
     }
 
-    if (completedShows.isNotEmpty()) {
-        item {
-            SectionTitle(stringResource(Res.string.downloads_section_shows))
-        }
-        items(
-            items = completedShows,
-            key = { (item, _) -> item.parentMetaId },
-        ) { (item, episodes) ->
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .clickable { onOpenShow(item.parentMetaId, item.title) },
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surfaceContainer,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text(
-                            text = item.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = stringResource(Res.string.downloads_episode_count, episodes.size),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+    if (shows.isNotEmpty()) {
+        item(key = "downloads-shows") {
+            DownloadsPosterShelf(
+                title = stringResource(Res.string.downloads_section_shows),
+                entries = shows,
+                watchedKeys = watchedKeys,
+                fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                onClick = onTitleClick,
+                onLongClick = onTitleLongPress,
+            )
         }
     }
 
-    if (completedMovies.isNotEmpty()) {
-        item {
-            SectionTitle(stringResource(Res.string.downloads_section_movies))
-        }
-        items(
-            items = completedMovies,
-            key = { it.id },
-        ) { item ->
-            DownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onPause = { DownloadsRepository.pauseDownload(item.id) },
-                onResume = { DownloadsRepository.resumeDownload(item.id) },
-                onRetry = { DownloadsRepository.retryDownload(item.id) },
-                onDelete = { onDeleteDownload(item.id) },
+    if (movies.isNotEmpty()) {
+        item(key = "downloads-movies") {
+            DownloadsPosterShelf(
+                title = stringResource(Res.string.downloads_section_movies),
+                entries = movies,
+                watchedKeys = watchedKeys,
+                fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                onClick = onTitleClick,
+                onLongClick = onTitleLongPress,
             )
         }
     }
@@ -310,6 +312,7 @@ private fun LazyListScope.downloadsShowContent(
     showId: String,
     episodes: List<DownloadItem>,
     onOpenDownload: (DownloadItem) -> Unit,
+    onEpisodeLongPress: (DownloadItem) -> Unit,
     onDeleteDownload: (String) -> Unit,
 ) {
     val showEpisodes = episodes
@@ -367,6 +370,7 @@ private fun LazyListScope.downloadsShowContent(
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
                 onRetry = { DownloadsRepository.retryDownload(item.id) },
                 onDelete = { onDeleteDownload(item.id) },
+                onLongPress = { onEpisodeLongPress(item) },
             )
         }
     }
@@ -380,6 +384,7 @@ private fun DownloadRow(
     onResume: () -> Unit,
     onRetry: () -> Unit,
     onDelete: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val displayTitle = item.displayTitle()
     val displaySubtitle = downloadDisplaySubtitle(
@@ -387,105 +392,116 @@ private fun DownloadRow(
         displayTitle = displayTitle,
     )
 
-    Surface(
+    // The padding sits outside the long-press target, so the lifted copy is exactly the card.
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clickable(enabled = item.isPlayable, onClick = onOpen),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+            .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
-        Column(
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .posterCardClickable(
+                    onClick = onOpen.takeIf { item.isPlayable },
+                    onLongClick = onLongPress,
+                    zoomImageUrl = item.episodeThumbnail ?: item.background ?: item.poster,
+                    zoomCornerRadius = 12.dp,
+                ),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top,
                 ) {
-                    Text(
-                        text = displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = displaySubtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = statusText(item),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when (item.status) {
-                        DownloadStatus.Downloading -> {
-                            IconButton(onClick = onPause) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Pause,
-                                    contentDescription = stringResource(Res.string.compose_action_pause),
-                                )
-                            }
-                        }
-                        DownloadStatus.Paused -> {
-                            IconButton(onClick = onResume) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = stringResource(Res.string.action_resume),
-                                )
-                            }
-                        }
-                        DownloadStatus.Failed -> {
-                            IconButton(onClick = onRetry) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = stringResource(Res.string.action_retry),
-                                )
-                            }
-                        }
-                        DownloadStatus.Completed -> {
-                            IconButton(onClick = onOpen) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = stringResource(Res.string.action_play),
-                                )
-                            }
-                        }
-                    }
-                    IconButton(onClick = onDelete) {
-                        Icon(
-                            imageVector = Icons.Rounded.Delete,
-                            contentDescription = stringResource(Res.string.action_delete),
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = displaySubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = statusText(item),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                }
-            }
 
-            if (item.status == DownloadStatus.Downloading) {
-                if (item.totalBytes != null && item.totalBytes > 0L) {
-                    LinearProgressIndicator(
-                        progress = item.progressFraction,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        when (item.status) {
+                            DownloadStatus.Downloading -> {
+                                IconButton(onClick = onPause) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Pause,
+                                        contentDescription = stringResource(Res.string.compose_action_pause),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Paused -> {
+                                IconButton(onClick = onResume) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = stringResource(Res.string.action_resume),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Failed -> {
+                                IconButton(onClick = onRetry) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = stringResource(Res.string.action_retry),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Completed -> {
+                                IconButton(onClick = onOpen) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = stringResource(Res.string.action_play),
+                                    )
+                                }
+                            }
+                        }
+                        IconButton(onClick = onDelete) {
+                            Icon(
+                                imageVector = Icons.Rounded.Delete,
+                                contentDescription = stringResource(Res.string.action_delete),
+                            )
+                        }
+                    }
+                }
+
+                if (item.status == DownloadStatus.Downloading) {
+                    if (item.totalBytes != null && item.totalBytes > 0L) {
+                        LinearProgressIndicator(
+                            progress = item.progressFraction,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
@@ -526,7 +542,7 @@ private fun downloadDisplaySubtitle(
 private fun SectionTitle(title: String) {
     Text(
         text = title,
-        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontWeight = FontWeight.SemiBold,
