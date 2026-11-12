@@ -3,9 +3,11 @@ package com.nuvio.app.features.downloads
 import com.nuvio.app.features.player.SubtitleAddonRequest
 import com.nuvio.app.features.streams.StreamSubtitle
 import kotlinx.serialization.Serializable
-import kotlinx.coroutines.runBlocking
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.downloads_enqueue_missing_url
+import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_busy
+import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_disabled
+import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_unsupported
 import nuvio.composeapp.generated.resources.downloads_enqueue_replaced
 import nuvio.composeapp.generated.resources.downloads_enqueue_started
 import nuvio.composeapp.generated.resources.downloads_enqueue_unsupported_format
@@ -43,6 +45,12 @@ data class DownloadItem(
     val sourceResponseHeaders: Map<String, String> = emptyMap(),
     val subtitleRequests: List<SubtitleAddonRequest> = emptyList(),
     val sourceSubtitles: List<StreamSubtitle> = emptyList(),
+    // Set only for torrent downloads. For these `sourceUrl` is just a magnet link used for display;
+    // the real HTTP source is the engine's local stream URL, which only exists while it runs.
+    val p2pInfoHash: String? = null,
+    val p2pFileIdx: Int? = null,
+    val p2pFilename: String? = null,
+    val p2pTrackers: List<String> = emptyList(),
     val localFileUri: String? = null,
     val fileName: String,
     val status: DownloadStatus,
@@ -54,6 +62,9 @@ data class DownloadItem(
 ) {
     val isEpisode: Boolean
         get() = seasonNumber != null && episodeNumber != null
+
+    val isP2p: Boolean
+        get() = !p2pInfoHash.isNullOrBlank()
 
     val isPlayable: Boolean
         get() = status == DownloadStatus.Completed && !localFileUri.isNullOrBlank()
@@ -91,15 +102,19 @@ enum class DownloadEnqueueResult {
     Started,
     Replaced,
     MissingUrl,
-    UnsupportedFormat;
+    UnsupportedFormat,
+    P2pUnsupported,
+    P2pDisabled,
+    P2pBusy;
 
-    fun toastMessage(): String = runBlocking {
-        when (this@DownloadEnqueueResult) {
-            Started -> getString(Res.string.downloads_enqueue_started)
-            Replaced -> getString(Res.string.downloads_enqueue_replaced)
-            MissingUrl -> getString(Res.string.downloads_enqueue_missing_url)
-            UnsupportedFormat -> getString(Res.string.downloads_enqueue_unsupported_format)
-        }
+    suspend fun toastMessage(): String = when (this) {
+        Started -> getString(Res.string.downloads_enqueue_started)
+        Replaced -> getString(Res.string.downloads_enqueue_replaced)
+        MissingUrl -> getString(Res.string.downloads_enqueue_missing_url)
+        UnsupportedFormat -> getString(Res.string.downloads_enqueue_unsupported_format)
+        P2pUnsupported -> getString(Res.string.downloads_enqueue_p2p_unsupported)
+        P2pDisabled -> getString(Res.string.downloads_enqueue_p2p_disabled)
+        P2pBusy -> getString(Res.string.downloads_enqueue_p2p_busy)
     }
 }
 

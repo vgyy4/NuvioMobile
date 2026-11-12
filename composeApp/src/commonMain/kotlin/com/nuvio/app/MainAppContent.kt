@@ -188,6 +188,8 @@ import dev.chrisbanes.haze.rememberHazeState
 import com.nuvio.app.features.servers.ServerRepository
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
@@ -333,10 +335,17 @@ internal fun MainAppContent(
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
     val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
-    val downloadsUiState by remember {
+    // Only the completed downloads matter here. Collecting the full state would recompose this
+    // whole screen on every download progress tick.
+    val completedDownloadsFlow = remember {
         DownloadsRepository.ensureLoaded()
         DownloadsRepository.uiState
-    }.collectAsStateWithLifecycle()
+            .map { it.completedItems }
+            .distinctUntilChanged()
+    }
+    val completedDownloads by completedDownloadsFlow.collectAsStateWithLifecycle(
+        initialValue = remember(completedDownloadsFlow) { DownloadsRepository.uiState.value.completedItems },
+    )
     val networkStatusUiState by remember {
         NetworkStatusRepository.uiState
     }.collectAsStateWithLifecycle()
@@ -618,7 +627,7 @@ internal fun MainAppContent(
         initialHomeReady,
         offlineLaunchRouteHandled,
         networkStatusUiState.condition,
-        downloadsUiState.completedItems,
+        completedDownloads,
     ) {
         if (!ownsAppRuntime) return@LaunchedEffect
         if (!initialHomeReady || offlineLaunchRouteHandled) return@LaunchedEffect
@@ -636,7 +645,7 @@ internal fun MainAppContent(
             NetworkCondition.ServersUnreachable,
             -> {
                 offlineLaunchRouteHandled = true
-                val hasPlayableDownload = downloadsUiState.completedItems.any {
+                val hasPlayableDownload = completedDownloads.any {
                     DownloadsRepository.playableLocalFileUri(it) != null
                 }
                 if (hasPlayableDownload) {

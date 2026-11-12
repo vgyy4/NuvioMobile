@@ -10,11 +10,14 @@ import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.addons.ManagedAddon
 import com.nuvio.app.features.addons.supportsResource
 import com.nuvio.app.features.details.MetaDetailsRepository
+import com.nuvio.app.features.downloads.DownloadStatus
 import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.plugins.PluginRepository
 import com.nuvio.app.features.plugins.PluginsUiState
 import com.nuvio.app.features.servers.ServerRepository
 import com.nuvio.app.features.servers.ServerStreams
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 internal fun AddonManifest.supportsStream(type: String, videoId: String): Boolean =
     supportsResource("stream", type, videoId)
@@ -76,15 +79,23 @@ internal fun rememberPlaybackAvailability(): PlaybackAvailability {
     } else {
         PluginsUiState(pluginsEnabled = false)
     }
-    val downloads by remember {
+    // Playback only depends on which downloads are complete; progress ticks must not rebuild this.
+    val completedDownloadsFlow = remember {
         DownloadsRepository.ensureLoaded()
         DownloadsRepository.uiState
-    }.collectAsStateWithLifecycle()
+            .map { state -> state.items.count { it.status == DownloadStatus.Completed } }
+            .distinctUntilChanged()
+    }
+    val completedDownloadCount by completedDownloadsFlow.collectAsStateWithLifecycle(
+        initialValue = remember(completedDownloadsFlow) {
+            DownloadsRepository.uiState.value.items.count { it.status == DownloadStatus.Completed }
+        },
+    )
     val servers by remember {
         ServerRepository.ensureLoaded()
         ServerRepository.uiState
     }.collectAsStateWithLifecycle()
-    return remember(addons, plugins, downloads, servers.revision) {
+    return remember(addons, plugins, completedDownloadCount, servers.revision) {
         PlaybackAvailability(addons.addons, plugins)
     }
 }

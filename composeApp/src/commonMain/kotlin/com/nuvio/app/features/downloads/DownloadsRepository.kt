@@ -1,9 +1,29 @@
 package com.nuvio.app.features.downloads
 
+import com.nuvio.app.core.build.AppFeaturePolicy
+import com.nuvio.app.features.p2p.P2pSettingsRepository
+import com.nuvio.app.features.p2p.P2pStreamRequest
+import com.nuvio.app.features.p2p.P2pStreamingEngine
+import com.nuvio.app.features.p2p.P2pStreamingState
+import com.nuvio.app.features.p2p.buildP2pMagnetUri
+import com.nuvio.app.features.p2p.formatP2pMegabytes
 import com.nuvio.app.features.player.SubtitleRequestExtras
 import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.streams.StreamItem
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +43,9 @@ object DownloadsRepository {
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
     private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
+    private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var activeP2pHandle: P2pDownloadHandle? = null
+    private var lastProgressPersistEpochMs = 0L
     private var hasLoaded = false
     private var nextDownloadOrdinal = 0L
 
@@ -127,14 +150,29 @@ object DownloadsRepository {
     ): DownloadEnqueueResult {
         ensureLoaded()
 
-        val sourceUrl = stream.playableDirectUrl
+        val directUrl = stream.playableDirectUrl
             ?.trim()
             ?.takeIf { it.isNotBlank() }
-            ?: return DownloadEnqueueResult.MissingUrl
-
-        if (!sourceUrl.isSupportedDownloadUrl()) {
+        // A torrent without an HTTP link is downloaded through the P2P engine instead.
+        val p2pInfoHash = if (directUrl == null && stream.isTorrentStream) stream.p2pInfoHash else null
+        if (directUrl == null && p2pInfoHash == null) return DownloadEnqueueResult.MissingUrl
+        if (directUrl != null && !directUrl.isSupportedDownloadUrl()) {
             return DownloadEnqueueResult.UnsupportedFormat
         }
+        if (p2pInfoHash != null) {
+            if (!AppFeaturePolicy.p2pEnabled || !P2pDownloadPlatform.isSupported) {
+                return DownloadEnqueueResult.P2pUnsupported
+            }
+            P2pSettingsRepository.ensureLoaded()
+            if (!P2pSettingsRepository.uiState.value.p2pEnabled) {
+                return DownloadEnqueueResult.P2pDisabled
+            }
+            // The engine serves one torrent at a time.
+            if (activeP2pHandle?.stopping == false) return DownloadEnqueueResult.P2pBusy
+        }
+        val sourceUrl = directUrl
+            ?: runCatching { buildP2pMagnetUri(checkNotNull(p2pInfoHash), stream.p2pTrackers) }.getOrNull()
+            ?: return DownloadEnqueueResult.MissingUrl
 
         val now = DownloadsClock.nowEpochMs()
         val logicalKey = buildLogicalKey(
@@ -161,7 +199,11 @@ object DownloadsRepository {
             episodeNumber = episodeNumber,
             episodeTitle = episodeTitle,
             fallbackTitle = stream.streamLabel,
-            sourceUrl = sourceUrl,
+            extension = if (p2pInfoHash != null) {
+                stream.behaviorHints.filename.fileExtensionFromFileName() ?: "mkv"
+            } else {
+                sourceUrl.fileExtensionFromUrl()
+            },
             downloadId = downloadId,
         )
 
@@ -189,9 +231,17 @@ object DownloadsRepository {
             subtitleRequests = addonSubtitleRequests(
                 type = contentType,
                 videoId = videoId,
-                extras = SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl),
+                extras = if (p2pInfoHash != null) {
+                    SubtitleRequestExtras.from(stream.behaviorHints)
+                } else {
+                    SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl)
+                },
             ),
             sourceSubtitles = stream.externalSubtitles,
+            p2pInfoHash = p2pInfoHash,
+            p2pFileIdx = if (p2pInfoHash != null) stream.p2pFileIdx else null,
+            p2pFilename = if (p2pInfoHash != null) stream.behaviorHints.filename else null,
+            p2pTrackers = if (p2pInfoHash != null) stream.p2pTrackers else emptyList(),
             localFileUri = null,
             fileName = fileName,
             status = DownloadStatus.Downloading,
@@ -312,24 +362,15 @@ object DownloadsRepository {
     }
 
     private fun startDownload(item: DownloadItem) {
+        if (item.isP2p) {
+            startP2pDownload(item)
+            return
+        }
         val request = DownloadPlatformRequest(item)
 
         val handle = DownloadsPlatformDownloader.start(
             request = request,
-            onProgress = { downloadedBytes, totalBytes ->
-                mutateItem(item.id) { current ->
-                    if (current.status != DownloadStatus.Downloading) {
-                        current
-                    } else {
-                        current.copy(
-                            downloadedBytes = downloadedBytes.coerceAtLeast(0L),
-                            totalBytes = totalBytes?.takeIf { it > 0L },
-                            updatedAtEpochMs = DownloadsClock.nowEpochMs(),
-                            errorMessage = null,
-                        )
-                    }
-                }
-            },
+            onProgress = { downloadedBytes, totalBytes -> applyProgress(item.id, downloadedBytes, totalBytes) },
             onSuccess = { localFileUri, totalBytes ->
                 activeHandles.remove(item.id)
                 mutateItem(item.id) { current ->
@@ -374,7 +415,231 @@ object DownloadsRepository {
         activeHandles[item.id] = handle
     }
 
-    private fun mutateItem(downloadId: String, transform: (DownloadItem) -> DownloadItem) {
+    // ---- Torrent (P2P) downloads -------------------------------------------------------------
+    //
+    // The engine exposes each torrent file as a local HTTP stream. A torrent download starts that
+    // stream and copies it to a file with the regular platform downloader, so pause/resume (Range
+    // requests against the .part file), progress and file handling are shared with HTTP downloads.
+    //
+    // Disk use: while a stream is open the engine keeps the file's pieces in its cache, so a
+    // running torrent download needs about twice the file size. The free-space check below refuses
+    // to start when that does not fit, and the engine cache is reclaimed whenever the download
+    // stops (finished, paused, failed or cancelled), so the file is not stored twice afterwards.
+    // The .part file holds everything downloaded so far, so nothing is lost by reclaiming.
+
+    private fun startP2pDownload(item: DownloadItem) {
+        val previous = activeP2pHandle
+        if (previous != null && !previous.stopping) {
+            // Another torrent is using the engine.
+            p2pScope.launch { markFailed(item.id, getString(Res.string.downloads_p2p_busy)) }
+            return
+        }
+        val handle = P2pDownloadHandle(item.id)
+        activeP2pHandle = handle
+        activeHandles[item.id] = handle
+        handle.job = p2pScope.launch {
+            try {
+                // A previous download may still be releasing the engine; never overlap with it.
+                previous?.job?.join()
+                // Paused or cancelled before it got to start.
+                if (handle.stopping) return@launch
+                runP2pDownload(item, handle)
+            } finally {
+                if (activeHandles[item.id] === handle) activeHandles.remove(item.id)
+            }
+        }
+    }
+
+    private suspend fun runP2pDownload(item: DownloadItem, handle: P2pDownloadHandle) {
+        var engineInUse = false
+        try {
+            val infoHash = item.p2pInfoHash
+            P2pSettingsRepository.ensureLoaded()
+            if (infoHash == null ||
+                !AppFeaturePolicy.p2pEnabled ||
+                !P2pDownloadPlatform.isSupported ||
+                !P2pSettingsRepository.uiState.value.p2pEnabled
+            ) {
+                markFailed(item.id, getString(Res.string.downloads_p2p_unavailable))
+                return
+            }
+            val engineState = P2pStreamingEngine.state.value
+            if (engineState is P2pStreamingState.Connecting || engineState is P2pStreamingState.Streaming) {
+                // Playback owns the engine. Never stop its stream.
+                markFailed(item.id, getString(Res.string.downloads_p2p_playback_active))
+                return
+            }
+
+            engineInUse = true
+            val localUrl = try {
+                withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
+                    P2pStreamingEngine.startStream(
+                        P2pStreamRequest(
+                            infoHash = infoHash,
+                            fileIdx = item.p2pFileIdx,
+                            filename = item.p2pFilename,
+                            trackers = item.p2pTrackers,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                markFailed(
+                    item.id,
+                    error.message?.takeIf { it.isNotBlank() } ?: getString(Res.string.download_failed),
+                )
+                return
+            }
+            if (localUrl == null) {
+                markFailed(item.id, getString(Res.string.downloads_p2p_no_peers))
+                return
+            }
+            currentCoroutineContext().ensureActive()
+
+            val outcome = CompletableDeferred<P2pDownloadOutcome>()
+            var spaceChecked = false
+            val transfer = DownloadsPlatformDownloader.start(
+                request = DownloadPlatformRequest(
+                    item.copy(sourceUrl = localUrl, sourceHeaders = emptyMap()),
+                ),
+                onProgress = { downloadedBytes, totalBytes ->
+                    if (!spaceChecked && totalBytes != null && totalBytes > 0L) {
+                        spaceChecked = true
+                        val needed = (totalBytes - downloadedBytes).coerceAtLeast(0L) * 2L +
+                            P2P_FREE_SPACE_RESERVE_BYTES
+                        val free = P2pDownloadPlatform.freeDiskSpaceBytes()
+                        if (free != null && free < needed) {
+                            handle.stopping = true
+                            outcome.complete(P2pDownloadOutcome.NotEnoughSpace(needed, free))
+                        }
+                    }
+                    if (!handle.stopping) applyProgress(item.id, downloadedBytes, totalBytes)
+                },
+                onSuccess = { localFileUri, totalBytes ->
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Success(localFileUri, totalBytes))
+                },
+                onFailure = { message ->
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Failure(message))
+                },
+                onPaused = {
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Paused)
+                },
+            )
+            handle.transfer = transfer
+            if (handle.stopping && !outcome.isCompleted) transfer.cancel()
+
+            when (val result = outcome.await()) {
+                is P2pDownloadOutcome.Success -> mutateItem(item.id) { current ->
+                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                    current.copy(
+                        status = DownloadStatus.Completed,
+                        localFileUri = result.localFileUri,
+                        downloadedBytes = result.totalBytes?.takeIf { it > 0L } ?: current.downloadedBytes,
+                        totalBytes = result.totalBytes?.takeIf { it > 0L } ?: current.totalBytes,
+                        errorMessage = null,
+                        updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                    )
+                }
+                is P2pDownloadOutcome.Failure -> markFailed(
+                    item.id,
+                    result.message.ifBlank { getString(Res.string.download_failed) },
+                )
+                is P2pDownloadOutcome.NotEnoughSpace -> {
+                    transfer.cancel()
+                    markFailed(
+                        item.id,
+                        getString(
+                            Res.string.downloads_p2p_not_enough_space,
+                            formatP2pMegabytes(result.neededBytes),
+                            formatP2pMegabytes(result.freeBytes),
+                        ),
+                    )
+                }
+                P2pDownloadOutcome.Paused -> mutateItem(item.id) { current ->
+                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                    current.copy(status = DownloadStatus.Paused, errorMessage = null)
+                }
+            }
+        } finally {
+            handle.stopping = true
+            withContext(NonCancellable) {
+                handle.transfer?.cancel()
+                if (engineInUse) releaseP2pEngine()
+                if (activeP2pHandle === handle) activeP2pHandle = null
+            }
+        }
+    }
+
+    /** Stops the engine stream and gives the engine's cached copy of the file back to the disk. */
+    private suspend fun releaseP2pEngine() {
+        P2pStreamingEngine.stopStream()
+        withTimeoutOrNull(P2P_STOP_TIMEOUT_MS) {
+            P2pStreamingEngine.state.first {
+                it is P2pStreamingState.Idle || it is P2pStreamingState.Error
+            }
+        }
+        runCatching { P2pStreamingEngine.clearCache() }
+    }
+
+    /**
+     * Playback and torrent downloads cannot share the engine. Call before starting a torrent
+     * stream: pauses a running torrent download and returns once the engine has been released.
+     * The download stays paused and resumes from its partial file when the user resumes it.
+     */
+    suspend fun pauseP2pDownloadsForPlayback() {
+        val handle = activeP2pHandle ?: return
+        pauseDownload(handle.itemId)
+        handle.cancel()
+        handle.job?.join()
+    }
+
+    private fun markFailed(downloadId: String, message: String) {
+        mutateItem(downloadId) { current ->
+            if (current.status != DownloadStatus.Downloading) {
+                current
+            } else {
+                current.copy(
+                    status = DownloadStatus.Failed,
+                    errorMessage = message,
+                    updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Progress arrives several times a second. Publishing is cheap, but persisting re-encodes the
+     * whole list and rewrites the file, so progress is only persisted every few seconds. Status
+     * changes always persist immediately, and downloads resume from the partial file's real size,
+     * so a stale persisted byte count is harmless.
+     */
+    private fun applyProgress(downloadId: String, downloadedBytes: Long, totalBytes: Long?) {
+        val now = DownloadsClock.nowEpochMs()
+        val shouldPersist = now - lastProgressPersistEpochMs >= PROGRESS_PERSIST_INTERVAL_MS
+        if (shouldPersist) lastProgressPersistEpochMs = now
+        mutateItem(downloadId, persistChange = shouldPersist) { current ->
+            if (current.status != DownloadStatus.Downloading) {
+                current
+            } else {
+                current.copy(
+                    downloadedBytes = downloadedBytes.coerceAtLeast(0L),
+                    totalBytes = totalBytes?.takeIf { it > 0L },
+                    updatedAtEpochMs = now,
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    private fun mutateItem(
+        downloadId: String,
+        persistChange: Boolean = true,
+        transform: (DownloadItem) -> DownloadItem,
+    ) {
         var changed = false
         val updated = _uiState.value.items.map { item ->
             if (item.id == downloadId) {
@@ -387,7 +652,7 @@ object DownloadsRepository {
 
         if (changed) {
             publish(updated)
-            persist()
+            if (persistChange) persist()
         }
     }
 
@@ -449,6 +714,35 @@ object DownloadsRepository {
                 localFileUri = localFileUri,
                 destinationFileName = fileName,
             ) != null
+}
+
+private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
+private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
+private const val P2P_STOP_TIMEOUT_MS = 10_000L
+// Headroom on top of the file copy and the engine's cached copy, so the device is not filled up.
+private const val P2P_FREE_SPACE_RESERVE_BYTES = 256L * 1024L * 1024L
+
+private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
+    var job: Job? = null
+    var transfer: DownloadsTaskHandle? = null
+
+    /** True once this download is ending (finished, failed, paused or cancelled). */
+    var stopping: Boolean = false
+
+    override fun cancel() {
+        stopping = true
+        // Cancel the coroutine first so a "cancelled" error from the aborted transfer is never
+        // reported as a failure.
+        job?.cancel()
+        transfer?.cancel()
+    }
+}
+
+private sealed interface P2pDownloadOutcome {
+    data class Success(val localFileUri: String, val totalBytes: Long?) : P2pDownloadOutcome
+    data class Failure(val message: String) : P2pDownloadOutcome
+    data class NotEnoughSpace(val neededBytes: Long, val freeBytes: Long) : P2pDownloadOutcome
+    data object Paused : P2pDownloadOutcome
 }
 
 @Serializable
@@ -524,7 +818,7 @@ private fun buildFileName(
     episodeNumber: Int?,
     episodeTitle: String?,
     fallbackTitle: String,
-    sourceUrl: String,
+    extension: String,
     downloadId: String,
 ): String {
     val baseTitle = if (seasonNumber != null && episodeNumber != null) {
@@ -543,7 +837,6 @@ private fun buildFileName(
         title.ifBlank { fallbackTitle }
     }
 
-    val extension = sourceUrl.fileExtensionFromUrl()
     return buildString {
         append(baseTitle.sanitizeFileName().ifBlank { "download" }.take(92))
         append('_')
@@ -567,6 +860,14 @@ private fun String.fileExtensionFromUrl(): String {
     } else {
         "mp4"
     }
+}
+
+private fun String?.fileExtensionFromFileName(): String? {
+    val suffix = this?.substringAfterLast('.', missingDelimiterValue = "")
+        ?.lowercase()
+        ?.trim()
+        .orEmpty()
+    return suffix.takeIf { it.length in 2..5 && it.all(Char::isLetterOrDigit) }
 }
 
 private fun String.isSupportedDownloadUrl(): Boolean {

@@ -5,6 +5,7 @@ import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.LocalFold
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.party.PartyRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.shuffle.EpisodeShuffleRepository
@@ -199,6 +200,8 @@ internal fun PlayerScreenRuntime.BindPlayerRuntimeEffects() {
         initialLoadCompleted = false
 
         try {
+            // The engine serves one torrent at a time: hand it over from a running torrent download.
+            DownloadsRepository.pauseP2pDownloadsForPlayback()
             val localUrl = P2pStreamingEngine.startStream(
                 P2pStreamRequest(
                     infoHash = infoHash,
@@ -225,7 +228,9 @@ internal fun PlayerScreenRuntime.BindPlayerRuntimeEffects() {
         }
     }
 
-    LaunchedEffect(p2pStreamingState, activeTorrentInfoHash) {
+    // Keyed on the error message only: stats are published several times a second and must not
+    // restart this effect.
+    LaunchedEffect((p2pStreamingState as? P2pStreamingState.Error)?.message, activeTorrentInfoHash) {
         val state = p2pStreamingState
         if (activeTorrentInfoHash != null && state is P2pStreamingState.Error) {
             p2pResolvedSourceUrl = null
