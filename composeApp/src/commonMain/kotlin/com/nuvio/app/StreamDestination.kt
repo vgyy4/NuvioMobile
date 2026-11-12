@@ -830,6 +830,7 @@ internal fun StreamDestination(
                 manualSelection = launch.manualSelection,
                 startFromBeginning = launch.startFromBeginning,
                 downloadOnly = launch.downloadOnly,
+                seasonBatch = launch.seasonBatch,
                 onStreamSelected = { stream, resolvedResumePositionMs, resolvedResumeProgressFraction ->
                     openSelectedStream(
                         stream = stream,

@@ -93,6 +93,10 @@ import com.nuvio.app.core.ui.NuvioCardDepthSurface
 import com.nuvio.app.core.ui.NuvioPosterZoomActionOverlay
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.PosterZoomAnchor
+import com.nuvio.app.core.ui.DialogButton
+import com.nuvio.app.core.ui.DialogButtonStyle
+import com.nuvio.app.core.ui.DialogButtons
+import com.nuvio.app.core.ui.DialogSurface
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
 import com.nuvio.app.core.ui.ScreenActivityEffect
@@ -143,6 +147,7 @@ import com.nuvio.app.features.shuffle.rememberShuffleSave
 import com.nuvio.app.features.shuffle.shufflePrimaryAction
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.streams.rememberPlaybackAvailability
+import com.nuvio.app.features.streams.SeasonBatchEpisode
 import com.nuvio.app.features.streams.StreamAutoPlayPolicy
 import com.nuvio.app.features.tmdb.TmdbSettingsRepository
 import com.nuvio.app.features.tmdb.TmdbService
@@ -190,6 +195,7 @@ fun MetaDetailsScreen(
     onBack: () -> Unit,
     onPlay: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
     onPlayManually: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
+    onDownloadSeason: ((type: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, episodes: List<SeasonBatchEpisode>) -> Unit)? = null,
     onDownloadSource: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
     onOpenMeta: ((MetaPreview) -> Unit)? = null,
     onCastClick: ((MetaPerson, String?) -> Unit)? = null,
@@ -260,6 +266,7 @@ fun MetaDetailsScreen(
     var selectedEpisodeForActions by remember(type, id) { mutableStateOf<MetaVideo?>(null) }
     var selectedEpisodeZoomAnchor by remember(type, id) { mutableStateOf<PosterZoomAnchor?>(null) }
     var episodeToRate by remember(type, id) { mutableStateOf<MetaVideo?>(null) }
+    var seasonDownloadPrompt by remember(type, id) { mutableStateOf<SeasonDownloadPrompt?>(null) }
     val episodeOverlayHazeState = rememberHazeState()
     var selectedSeasonForActions by remember(type, id) { mutableStateOf<Int?>(null) }
     val commentsEnabled by remember {
@@ -1851,6 +1858,39 @@ fun MetaDetailsScreen(
                             ),
                         )
                     }
+                    if (
+                        onDownloadSeason != null &&
+                        seasonEpisodes.isNotEmpty() &&
+                        playbackAvailability.canStream(meta.type, selectedEpisode.id)
+                    ) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Rounded.Download,
+                                label = stringResource(Res.string.season_download_action),
+                                onSelected = {
+                                    val watched = seasonEpisodes.filter { episode ->
+                                        isEpisodeWatchedForActions(
+                                            meta = meta,
+                                            episode = episode,
+                                            watchedKeys = watchedUiState.watchedKeys,
+                                            progressByVideoId = progressByVideoId,
+                                        )
+                                    }
+                                    val prompt = SeasonDownloadPrompt(
+                                        meta = meta,
+                                        allEpisodes = seasonEpisodes,
+                                        unwatchedEpisodes = seasonEpisodes - watched.toSet(),
+                                    )
+                                    // Ask only when the season is partly watched.
+                                    if (watched.isEmpty() || watched.size == seasonEpisodes.size) {
+                                        startSeasonDownload(onDownloadSeason, prompt.meta, prompt.allEpisodes)
+                                    } else {
+                                        seasonDownloadPrompt = prompt
+                                    }
+                                },
+                            ),
+                        )
+                    }
                 },
                 hazeState = episodeOverlayHazeState,
                 onDismissed = {
@@ -1858,6 +1898,36 @@ fun MetaDetailsScreen(
                     selectedEpisodeZoomAnchor = null
                 },
             )
+        }
+
+        seasonDownloadPrompt?.let { prompt ->
+            DialogSurface(
+                onDismissRequest = { seasonDownloadPrompt = null },
+                title = stringResource(Res.string.season_download_prompt_title),
+                message = stringResource(
+                    Res.string.season_download_prompt_message,
+                    prompt.allEpisodes.size - prompt.unwatchedEpisodes.size,
+                    prompt.allEpisodes.size,
+                ),
+            ) {
+                DialogButtons {
+                    DialogButton(
+                        text = stringResource(Res.string.season_download_prompt_unwatched, prompt.unwatchedEpisodes.size),
+                        onClick = {
+                            seasonDownloadPrompt = null
+                            onDownloadSeason?.let { startSeasonDownload(it, prompt.meta, prompt.unwatchedEpisodes) }
+                        },
+                    )
+                    DialogButton(
+                        text = stringResource(Res.string.season_download_prompt_all, prompt.allEpisodes.size),
+                        onClick = {
+                            seasonDownloadPrompt = null
+                            onDownloadSeason?.let { startSeasonDownload(it, prompt.meta, prompt.allEpisodes) }
+                        },
+                        style = DialogButtonStyle.Primary,
+                    )
+                }
+            }
         }
 
         val ratedEpisode = episodeToRate
@@ -2641,4 +2711,32 @@ private fun Color.blendTowards(target: Color, fraction: Float): Color {
         blue = blue + (target.blue - blue) * clamped,
         alpha = alpha + (target.alpha - alpha) * clamped,
     )
+}
+
+
+private class SeasonDownloadPrompt(
+    val meta: MetaDetails,
+    val allEpisodes: List<MetaVideo>,
+    val unwatchedEpisodes: List<MetaVideo>,
+)
+
+private fun startSeasonDownload(
+    action: (type: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, episodes: List<SeasonBatchEpisode>) -> Unit,
+    meta: MetaDetails,
+    episodes: List<MetaVideo>,
+) {
+    val batch = episodes
+        .filter { it.season != null && it.episode != null }
+        .sortedWith(compareBy({ it.season }, { it.episode }))
+        .map {
+            SeasonBatchEpisode(
+                videoId = it.id,
+                season = checkNotNull(it.season),
+                episode = checkNotNull(it.episode),
+                title = it.title,
+                thumbnail = it.thumbnail,
+            )
+        }
+    if (batch.isEmpty()) return
+    action(meta.type, meta.id, meta.type, meta.name, meta.logo, meta.poster, meta.background, batch)
 }

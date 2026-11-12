@@ -1114,6 +1114,36 @@ internal fun MainAppContent(
                 )
             }
 
+        val onDownloadSeason: SeasonDownloadAction =
+            { type, parentMetaId, parentMetaType, title, logo, poster, background, episodes ->
+                val first = episodes.firstOrNull()
+                if (first != null && PlaybackAvailability.current().canStream(type, first.videoId)) {
+                    val streamLaunchId = StreamLaunchStore.put(
+                        StreamLaunch(
+                            profileId = activePlaybackProfileId,
+                            type = type,
+                            videoId = first.videoId,
+                            parentMetaId = parentMetaId,
+                            parentMetaType = parentMetaType,
+                            title = title,
+                            logo = logo,
+                            poster = poster,
+                            background = background,
+                            seasonNumber = first.season,
+                            episodeNumber = first.episode,
+                            episodeTitle = first.title,
+                            episodeThumbnail = first.thumbnail,
+                            manualSelection = true,
+                            downloadOnly = true,
+                            seasonBatch = episodes.drop(1),
+                        ),
+                    )
+                    navController.navigate(StreamRoute(launchId = streamLaunchId, title = title))
+                } else {
+                    NuvioToastController.show(playbackUnavailableMessage)
+                }
+            }
+
         val onDownloadSource: ContentPlayAction =
             { type, videoId, parentMetaId, parentMetaType, title, logo, poster, background, seasonNumber, episodeNumber, episodeTitle, episodeThumbnail, pauseDescription, resumePositionMs ->
                 launchPlaybackWithDownloadPreference(
@@ -1583,6 +1613,7 @@ internal fun MainAppContent(
                         onPlay = onPlay,
                         onPlayManually = onPlayManually,
                         onDownloadSource = onDownloadSource,
+                        onDownloadSeason = onDownloadSeason,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = LocalNavAnimatedContentScope.current,
                     )
