@@ -2007,6 +2007,7 @@ internal fun MainAppContent(
                             if (
                                 preview.type.equals("movie", ignoreCase = true) &&
                                 !preview.id.startsWith("tmdb:") &&
+                                DownloadsRepository.findPlayableDownload(parentMetaId = preview.id) == null &&
                                 playbackAvailability.canStream(preview.type, preview.id)
                             ) {
                                 PosterZoomOverlayAction(
@@ -2122,7 +2123,15 @@ internal fun MainAppContent(
                                         ),
                                     )
                                 }
-                                if (canSelectContinueWatchingStreams(item)) {
+                                if (
+                                    canSelectContinueWatchingStreams(item) &&
+                                    DownloadsRepository.findPlayableDownload(
+                                        parentMetaId = item.parentMetaId,
+                                        seasonNumber = item.seasonNumber,
+                                        episodeNumber = item.episodeNumber,
+                                        videoId = item.videoId,
+                                    ) == null
+                                ) {
                                     add(
                                         PosterZoomOverlayAction(
                                             icon = Icons.Rounded.Download,
