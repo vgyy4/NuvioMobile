@@ -220,7 +220,7 @@ actual object P2pStreamingEngine {
                     addMagnet(activeEngine, magnet).also(knownTorrentIds::add)
                 }
                 currentCoroutineContext().ensureActive()
-                val stream = prepareStream(activeEngine, torrentId, request.fileIdx, request.filename)
+                val stream = prepareStream(activeEngine, torrentId, request.fileIdx, request.filename, bulk = true)
                 preparedStream = stream
                 currentCoroutineContext().ensureActive()
                 downloadStreams[stream.id] = stream
@@ -464,6 +464,7 @@ actual object P2pStreamingEngine {
         torrentId: String,
         fileIndex: Int?,
         filename: String?,
+        bulk: Boolean = false,
     ): NativeStream {
         val requestId = memScoped {
             val request = alloc<nuvio_engine_stream_request>()
@@ -474,6 +475,9 @@ actual object P2pStreamingEngine {
             request.torrent_id = torrentId.cstr.getPointer(this)
             request.file_index = fileIndex?.toUInt() ?: UInt.MAX_VALUE
             request.filename_hint = filename?.cstr?.getPointer(this)
+            // Downloads save the bytes: only verified data, and no playback deadlines
+            // (NUVIO_ENGINE_STREAM_FLAG_BULK = 2; engines built before the flag ignore it).
+            request.flags = if (bulk) 2u else 0u
             val output = alloc<ULongVar>()
             checkStatus(nuvio_engine_prepare_stream(activeEngine, request.ptr, output.ptr))
             output.value
