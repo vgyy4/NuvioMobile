@@ -216,6 +216,9 @@ fun StreamsScreen(
         if (available.isNotEmpty()) {
             DownloadsRepository.rememberSubtitleSelection(offered = available, ticked = chosenSubtitles)
         }
+        // With nothing offered (e.g. the add-ons did not answer in time) there was no choice to
+        // make: keep subtitles on, so whatever the add-ons return when the download starts is saved.
+        val downloadSubtitles = available.isEmpty() || chosenSubtitles.isNotEmpty()
 
         val result = DownloadsRepository.enqueueFromStream(
             contentType = type,
@@ -231,7 +234,7 @@ fun StreamsScreen(
             episodeTitle = episodeTitle,
             episodeThumbnail = episodeThumbnail,
             stream = target,
-            downloadSubtitles = chosenSubtitles.isNotEmpty(),
+            downloadSubtitles = downloadSubtitles,
             // Empty means "every language": used when all of them were kept.
             subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
         )
@@ -249,7 +252,7 @@ fun StreamsScreen(
                     poster = poster,
                     background = background,
                     template = target,
-                    downloadSubtitles = chosenSubtitles.isNotEmpty(),
+                    downloadSubtitles = downloadSubtitles,
                     subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
                     episodes = seasonBatch,
                 ),

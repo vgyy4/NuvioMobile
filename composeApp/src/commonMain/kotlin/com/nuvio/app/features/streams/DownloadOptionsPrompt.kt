@@ -18,14 +18,16 @@ import com.nuvio.app.core.ui.DialogButtonStyle
 import com.nuvio.app.core.ui.DialogButtons
 import com.nuvio.app.core.ui.DialogOption
 import com.nuvio.app.core.ui.DialogSurface
+import com.nuvio.app.features.player.SubtitleUnknownLanguageKey
 import com.nuvio.app.features.player.languageLabelForCode
 import kotlinx.coroutines.CompletableDeferred
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
 /**
- * The options asked for before a download starts. [answer] holds the subtitle languages to
- * download (empty = no subtitles), or null if the question was dismissed (cancels the download).
+ * The options asked for before a download starts. [subtitleLanguageCodes] are language keys (see
+ * `downloadSubtitleLanguageKey`). [answer] holds the subtitle languages to download (empty = no
+ * subtitles), or null if the question was dismissed (cancels the download).
  */
 internal class DownloadOptionsPrompt(
     val subtitleLanguageCodes: List<String>,
@@ -64,7 +66,12 @@ internal fun DownloadOptionsDialog(prompt: DownloadOptionsPrompt) {
             items(prompt.subtitleLanguageCodes, key = { it }) { code ->
                 val isSelected = code in selected
                 DialogOption(
-                    text = languageLabelForCode(code),
+                    // Subtitles whose language is missing or not recognised share one "Unknown" entry.
+                    text = if (code == SubtitleUnknownLanguageKey) {
+                        stringResource(Res.string.subtitle_language_unknown)
+                    } else {
+                        languageLabelForCode(code)
+                    },
                     selected = isSelected,
                     role = Role.Checkbox,
                     onClick = { selected = if (isSelected) selected - code else selected + code },

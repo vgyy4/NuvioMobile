@@ -2,6 +2,9 @@ package com.nuvio.app.features.downloads
 
 import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import com.nuvio.app.features.player.PlayerSubtitleCueParser
+import com.nuvio.app.features.player.SubtitleAddonRequest
+import com.nuvio.app.features.player.SubtitleUnknownLanguageKey
+import com.nuvio.app.features.player.getLanguageLabelForCode
 import com.nuvio.app.features.player.loadAddonSubtitles
 import com.nuvio.app.features.player.normalizeLanguageCode
 import com.nuvio.app.features.streams.StreamSubtitle
@@ -31,41 +34,30 @@ internal object DownloadSubtitles {
         val saved = manifest.tracks.filter { storage.localFileUri(it.fileName) != null }.toMutableList()
         if (manifest.complete && saved.size == manifest.tracks.size) return@withContext
         var nextFileIndex = (saved.maxOfOrNull { it.fileName.substringBefore('.').toIntOrNull() ?: -1 } ?: -1) + 1
-        val addonSubtitles = loadAddonSubtitles(item.subtitleRequests).map {
-            StreamSubtitle(url = it.url, language = it.language, name = it.display)
-        }
-        val wantedLanguages = item.subtitleLanguages.mapNotNull(::normalizeLanguageCode).toSet()
-        val pending = (item.sourceSubtitles + addonSubtitles)
-            .distinctBy { it.url }
-            .filter { subtitle ->
-                (subtitle.url.startsWith("https://", true) || subtitle.url.startsWith("http://", true)) &&
-                    saved.none { it.sourceUrl == subtitle.url } &&
-                    (wantedLanguages.isEmpty() || normalizeLanguageCode(subtitle.language) in wantedLanguages)
-            }
+        // Subtitles found when the download was queued, plus what the add-ons offer now. Filtered
+        // with the same grouping as the download options, so what was ticked there is saved here.
+        val pending = filterSubtitlesByLanguages(
+            discover(item.subtitleRequests, item.sourceSubtitles).subtitles,
+            item.subtitleLanguages,
+        ).filter { subtitle -> saved.none { it.sourceUrl == subtitle.url } }
         for (batch in pending.chunked(4)) {
             val fetched = coroutineScope {
-                batch.map { subtitle ->
-                    async {
-                        val body = try {
-                            withTimeoutOrNull(15_000L) {
-                                httpGetTextWithHeaders(subtitle.url, subtitle.headers.orEmpty())
-                            }?.takeIf { it.isNotBlank() && PlayerSubtitleCueParser.parse(it, subtitle.url).isNotEmpty() }
-                        } catch (error: Exception) {
-                            if (error is CancellationException) throw error
-                            null
-                        }
-                        subtitle to body
-                    }
-                }.awaitAll()
+                batch.map { subtitle -> async { subtitle to fetchSubtitleBody(subtitle) } }.awaitAll()
             }
             for ((subtitle, body) in fetched) {
                 currentCoroutineContext().ensureActive()
+                // One subtitle that cannot be fetched or saved never fails the download.
                 if (body == null) continue
                 val extension = PlayerSubtitleCueParser.fileExtension(body, subtitle.url)
                 val fileName = "${nextFileIndex++}.$extension"
                 try {
+                    // What the offline player shows: a normalized language and a readable name.
+                    val language = normalizeLanguageCode(subtitle.language)
+                        ?.takeIf { downloadSubtitleLanguageKey(it) != SubtitleUnknownLanguageKey }
+                        ?: subtitle.language.ifBlank { "und" }
+                    val name = subtitle.name?.takeIf { it.isNotBlank() } ?: languageLabel(language)
                     storage.write(fileName, body)
-                    saved += DownloadedSubtitle(subtitle.url, fileName, subtitle.language, subtitle.name)
+                    saved += DownloadedSubtitle(subtitle.url, fileName, language, name)
                     storage.write("manifest.json", json.encodeToString(SubtitleManifest(tracks = saved.toList())))
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
@@ -78,6 +70,55 @@ internal object DownloadSubtitles {
         }
         Unit
     }
+
+    /**
+     * The subtitles that can be downloaded for a stream: the stream's own plus the ones of the
+     * subtitle add-ons, looked up with [requests] exactly as the player does ([loadAddonSubtitles];
+     * an add-on that fails or times out only contributes nothing). Remote files only, one per URL.
+     */
+    suspend fun discover(
+        requests: List<SubtitleAddonRequest>,
+        streamSubtitles: List<StreamSubtitle>,
+    ): DiscoveredSubtitles {
+        val addonSubtitles = loadAddonSubtitles(requests).map {
+            StreamSubtitle(url = it.url, language = it.language, name = it.display)
+        }
+        return DiscoveredSubtitles(
+            subtitles = (streamSubtitles + addonSubtitles)
+                .filter { it.url.isDownloadableSubtitleUrl() }
+                .distinctBy { it.url },
+            fromAddons = addonSubtitles.isNotEmpty(),
+        )
+    }
+
+    // The text of a subtitle file, or null when it cannot be fetched (tried twice) or has no cues.
+    private suspend fun fetchSubtitleBody(subtitle: StreamSubtitle): String? {
+        repeat(2) {
+            val body = try {
+                withTimeoutOrNull(15_000L) {
+                    httpGetTextWithHeaders(subtitle.url, mapOf("Accept" to "*/*") + subtitle.headers.orEmpty())
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                null
+            }
+            if (body != null) {
+                return body.takeIf { it.isNotBlank() && PlayerSubtitleCueParser.parse(it, subtitle.url).isNotEmpty() }
+            }
+        }
+        return null
+    }
+
+    private suspend fun languageLabel(language: String): String? =
+        try {
+            getLanguageLabelForCode(language)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            null
+        }
+
+    private fun String.isDownloadableSubtitleUrl(): Boolean =
+        startsWith("https://", ignoreCase = true) || startsWith("http://", ignoreCase = true)
 
     fun localSubtitles(localVideoUri: String): List<StreamSubtitle> {
         if (!localVideoUri.startsWith("file:")) return emptyList()
@@ -93,6 +134,12 @@ internal object DownloadSubtitles {
             storage.read("manifest.json")?.let { json.decodeFromString<SubtitleManifest>(it) }
         }.getOrNull() ?: SubtitleManifest()
 }
+
+/** [subtitles] that can be downloaded; [fromAddons] tells whether any came from a subtitle add-on. */
+internal class DiscoveredSubtitles(
+    val subtitles: List<StreamSubtitle>,
+    val fromAddons: Boolean,
+)
 
 @Serializable
 private data class SubtitleManifest(
