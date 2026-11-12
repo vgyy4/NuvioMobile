@@ -10,6 +10,8 @@ import com.nuvio.app.features.p2p.P2pStreamingEngine
 import com.nuvio.app.features.p2p.buildP2pMagnetUri
 import com.nuvio.app.features.p2p.formatP2pMegabytes
 import com.nuvio.app.features.player.SubtitleRequestExtras
+import com.nuvio.app.features.player.loadAddonSubtitles
+import com.nuvio.app.features.player.normalizeLanguageCode
 import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.streams.StreamItem
 import kotlinx.coroutines.CancellationException
@@ -42,6 +44,9 @@ object DownloadsRepository {
     private val _uiState = MutableStateFlow(DownloadsUiState())
     val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
 
+    private val _preferences = MutableStateFlow(DownloadPreferences())
+    val preferences: StateFlow<DownloadPreferences> = _preferences.asStateFlow()
+
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
@@ -73,8 +78,50 @@ object DownloadsRepository {
         activeHandles.clear()
         hasLoaded = false
         _hasUnseenCompleted.value = false
+        _preferences.value = DownloadPreferences()
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
+    }
+
+    fun setSubtitleMode(mode: DownloadSubtitleMode) {
+        ensureLoaded()
+        if (_preferences.value.subtitleMode == mode) return
+        _preferences.value = _preferences.value.copy(subtitleMode = mode)
+        persist()
+    }
+
+    /** An empty list means every language. */
+    fun setSubtitleLanguages(languages: List<String>) {
+        ensureLoaded()
+        val normalized = languages.distinct()
+        if (_preferences.value.subtitleLanguages == normalized) return
+        _preferences.value = _preferences.value.copy(subtitleLanguages = normalized)
+        persist()
+    }
+
+    /**
+     * The languages of the subtitles that [stream] offers (its own and the add-ons'), limited to
+     * the languages chosen in the settings. Empty when there is nothing to download.
+     */
+    suspend fun previewSubtitleLanguages(
+        contentType: String,
+        videoId: String,
+        stream: StreamItem,
+    ): List<String> {
+        ensureLoaded()
+        val extras = if (stream.playableDirectUrl == null) {
+            SubtitleRequestExtras.from(stream.behaviorHints)
+        } else {
+            SubtitleRequestExtras.from(stream.behaviorHints, stream.playableDirectUrl)
+        }
+        val addonLanguages = loadAddonSubtitles(
+            addonSubtitleRequests(type = contentType, videoId = videoId, extras = extras),
+        ).map { it.language }
+        val wanted = _preferences.value.subtitleLanguages.mapNotNull(::normalizeLanguageCode).toSet()
+        return (stream.externalSubtitles.map { it.language } + addonLanguages)
+            .mapNotNull(::normalizeLanguageCode)
+            .distinct()
+            .filter { wanted.isEmpty() || it in wanted }
     }
 
     fun findPlayableDownloadByVideoId(videoId: String?): DownloadItem? {
@@ -153,6 +200,7 @@ object DownloadsRepository {
         episodeTitle: String?,
         episodeThumbnail: String?,
         stream: StreamItem,
+        downloadSubtitles: Boolean = true,
     ): DownloadEnqueueResult {
         ensureLoaded()
 
@@ -242,6 +290,8 @@ object DownloadsRepository {
                 },
             ),
             sourceSubtitles = stream.externalSubtitles,
+            downloadSubtitles = downloadSubtitles,
+            subtitleLanguages = _preferences.value.subtitleLanguages,
             p2pInfoHash = p2pInfoHash,
             p2pFileIdx = if (p2pInfoHash != null) stream.p2pFileIdx else null,
             p2pFilename = if (p2pInfoHash != null) stream.behaviorHints.filename else null,
@@ -284,13 +334,14 @@ object DownloadsRepository {
     }
 
     /**
-     * Called when the app goes to the background on a platform that cannot keep downloading there.
-     * The downloads are resumed automatically when the app comes back.
+     * Called when the app goes to the background on Apple devices. Regular downloads are handed to
+     * the system, which keeps them going, so only torrent downloads (which need this app and its
+     * engine running) are paused. They resume automatically when the app comes back.
      */
     fun pauseActiveDownloads() {
         ensureLoaded()
         val active = _uiState.value.items
-            .filter { it.status == DownloadStatus.Downloading }
+            .filter { it.status == DownloadStatus.Downloading && it.isP2p }
             .map { it.id }
         pausedForBackground.addAll(active)
         active.forEach(::pauseDownload)
@@ -373,10 +424,12 @@ object DownloadsRepository {
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
+            _preferences.value = DownloadPreferences()
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
+        _preferences.value = DownloadsCodec.decodePreferences(payload)
 
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
@@ -696,7 +749,7 @@ object DownloadsRepository {
 
     private fun persist() {
         DownloadsStorage.savePayload(
-            DownloadsCodec.encodeItems(_uiState.value.items),
+            DownloadsCodec.encode(_uiState.value.items, _preferences.value),
         )
     }
 
@@ -760,6 +813,7 @@ private sealed interface P2pDownloadOutcome {
 @Serializable
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
+    val preferences: DownloadPreferences = DownloadPreferences(),
 )
 
 private object DownloadsCodec {
@@ -773,10 +827,16 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).items
         }.getOrDefault(emptyList())
 
-    fun encodeItems(items: Collection<DownloadItem>): String =
+    fun decodePreferences(payload: String): DownloadPreferences =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).preferences
+        }.getOrDefault(DownloadPreferences())
+
+    fun encode(items: Collection<DownloadItem>, preferences: DownloadPreferences): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
+                preferences = preferences,
             ),
         )
 }

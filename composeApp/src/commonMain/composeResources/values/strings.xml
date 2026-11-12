@@ -1691,6 +1691,17 @@
     <string name="streams_copy_link">Copy stream link</string>
     <string name="streams_download_file">Download file</string>
     <string name="download_action_label">Download</string>
+    <string name="download_subtitles_prompt_title">Download subtitles?</string>
+    <string name="download_subtitles_prompt_message">Subtitles are available in: %1$s. Download them with the video? You can change which languages are downloaded in Settings → Playback → Subtitles.</string>
+    <string name="download_subtitles_prompt_download">Download</string>
+    <string name="download_subtitles_prompt_skip">Skip</string>
+    <string name="settings_downloads_subtitles_section">Downloads</string>
+    <string name="settings_downloads_subtitles_mode">Subtitles in downloads</string>
+    <string name="settings_downloads_subtitles_mode_ask">Ask every time</string>
+    <string name="settings_downloads_subtitles_mode_always">Always download</string>
+    <string name="settings_downloads_subtitles_mode_never">Never download</string>
+    <string name="settings_downloads_subtitles_languages">Subtitle languages to download</string>
+    <string name="settings_downloads_subtitles_languages_all">All languages</string>
     <string name="streams_open_external_player">Open in external player</string>
     <string name="streams_open_internal_player">Open in internal player</string>
     <string name="streams_empty_load_failed_message">The installed stream addons failed to return a valid stream response.</string>

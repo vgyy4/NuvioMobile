@@ -3,6 +3,7 @@ package com.nuvio.app.features.downloads
 import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import com.nuvio.app.features.player.PlayerSubtitleCueParser
 import com.nuvio.app.features.player.loadAddonSubtitles
+import com.nuvio.app.features.player.normalizeLanguageCode
 import com.nuvio.app.features.streams.StreamSubtitle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +22,8 @@ internal object DownloadSubtitles {
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun prepare(item: DownloadItem, localVideoUri: String): Unit = withContext(Dispatchers.Default) {
+        // The user chose not to download subtitles for this item.
+        if (!item.downloadSubtitles) return@withContext
         val storage = DownloadSubtitleStorage(localVideoUri)
         val manifest = readManifest(storage)
         val saved = manifest.tracks.filter { storage.localFileUri(it.fileName) != null }.toMutableList()
@@ -29,11 +32,13 @@ internal object DownloadSubtitles {
         val addonSubtitles = loadAddonSubtitles(item.subtitleRequests).map {
             StreamSubtitle(url = it.url, language = it.language, name = it.display)
         }
+        val wantedLanguages = item.subtitleLanguages.mapNotNull(::normalizeLanguageCode).toSet()
         val pending = (item.sourceSubtitles + addonSubtitles)
             .distinctBy { it.url }
             .filter { subtitle ->
                 (subtitle.url.startsWith("https://", true) || subtitle.url.startsWith("http://", true)) &&
-                    saved.none { it.sourceUrl == subtitle.url }
+                    saved.none { it.sourceUrl == subtitle.url } &&
+                    (wantedLanguages.isEmpty() || normalizeLanguageCode(subtitle.language) in wantedLanguages)
             }
         for (batch in pending.chunked(4)) {
             val fetched = coroutineScope {
