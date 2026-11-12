@@ -143,6 +143,7 @@ open class MainActivity : AppCompatActivity() {
         CollectionStorage.initialize(applicationContext)
         DownloadsStorage.initialize(applicationContext)
         DownloadsPlatformDownloader.initialize(applicationContext)
+        com.nuvio.app.core.network.NetworkPathMonitor.initialize(applicationContext)
         DownloadsLiveStatusPlatform.initialize(applicationContext)
         AndroidAppUpdaterPlatform.initialize(applicationContext)
         PlatformLocalAccountDataCleaner.initialize(applicationContext)

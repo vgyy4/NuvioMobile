@@ -49,6 +49,10 @@ object DownloadsRepository {
     private val _deselectedSubtitleLanguages = MutableStateFlow<Set<String>>(emptySet())
     val deselectedSubtitleLanguages: StateFlow<Set<String>> = _deselectedSubtitleLanguages.asStateFlow()
 
+    // Whether the home screen turns into the downloads view while the device is offline.
+    private val _offlineDownloadsHome = MutableStateFlow(true)
+    val offlineDownloadsHome: StateFlow<Boolean> = _offlineDownloadsHome.asStateFlow()
+
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
@@ -81,8 +85,22 @@ object DownloadsRepository {
         hasLoaded = false
         _hasUnseenCompleted.value = false
         _deselectedSubtitleLanguages.value = emptySet()
+        _offlineDownloadsHome.value = true
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
+    }
+
+    fun setOfflineDownloadsHome(enabled: Boolean) {
+        ensureLoaded()
+        if (_offlineDownloadsHome.value == enabled) return
+        _offlineDownloadsHome.value = enabled
+        persist()
+    }
+
+    /** Deletes completed downloads (files, subtitles and skip times included). */
+    fun deleteDownloads(downloadIds: Collection<String>) {
+        ensureLoaded()
+        downloadIds.toList().forEach(::cancelDownload)
     }
 
     /** Remembers the choice made in the download options: offered but unticked languages. */
@@ -428,11 +446,13 @@ object DownloadsRepository {
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
             _deselectedSubtitleLanguages.value = emptySet()
+            _offlineDownloadsHome.value = true
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
         _deselectedSubtitleLanguages.value = DownloadsCodec.decodeDeselectedLanguages(payload)
+        _offlineDownloadsHome.value = DownloadsCodec.decodeOfflineDownloadsHome(payload)
 
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
@@ -752,7 +772,11 @@ object DownloadsRepository {
 
     private fun persist() {
         DownloadsStorage.savePayload(
-            DownloadsCodec.encode(_uiState.value.items, _deselectedSubtitleLanguages.value),
+            DownloadsCodec.encode(
+                _uiState.value.items,
+                _deselectedSubtitleLanguages.value,
+                _offlineDownloadsHome.value,
+            ),
         )
     }
 
@@ -817,6 +841,7 @@ private sealed interface P2pDownloadOutcome {
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
     val deselectedSubtitleLanguages: List<String> = emptyList(),
+    val offlineDownloadsHome: Boolean = true,
 )
 
 private object DownloadsCodec {
@@ -835,11 +860,21 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).deselectedSubtitleLanguages.toSet()
         }.getOrDefault(emptySet())
 
-    fun encode(items: Collection<DownloadItem>, deselectedSubtitleLanguages: Set<String>): String =
+    fun decodeOfflineDownloadsHome(payload: String): Boolean =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).offlineDownloadsHome
+        }.getOrDefault(true)
+
+    fun encode(
+        items: Collection<DownloadItem>,
+        deselectedSubtitleLanguages: Set<String>,
+        offlineDownloadsHome: Boolean,
+    ): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
                 deselectedSubtitleLanguages = deselectedSubtitleLanguages.toList().sorted(),
+                offlineDownloadsHome = offlineDownloadsHome,
             ),
         )
 }

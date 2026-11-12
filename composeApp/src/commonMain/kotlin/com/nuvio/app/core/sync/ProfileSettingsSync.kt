@@ -196,6 +196,7 @@ object ProfileSettingsSync {
             PlayerSettingsRepository.uiState.map { "player" },
             StreamBadgeSettingsRepository.uiState.map { "stream_badges" },
             DownloadsRepository.deselectedSubtitleLanguages.map { "download_subtitle_languages" },
+            DownloadsRepository.offlineDownloadsHome.map { "download_offline_home" },
             DebridSettingsRepository.uiState.map { "debrid" },
             TmdbSettingsRepository.uiState.map { "tmdb" },
             MdbListSettingsRepository.uiState.map { "mdblist" },
@@ -253,6 +254,7 @@ object ProfileSettingsSync {
                 ),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
                 downloadSubtitleDeselectedLanguages = DownloadsRepository.deselectedSubtitleLanguages.value.toList().sorted(),
+                downloadOfflineHome = DownloadsRepository.offlineDownloadsHome.value,
                 debridSettings = withoutProfileCredentials(
                     PROFILE_DEBRID_SETTINGS_FEATURE,
                     DebridSettingsStorage.exportToSyncPayload(),
@@ -313,6 +315,7 @@ object ProfileSettingsSync {
 
         // Absent in blobs written by older versions: keep the local choice then.
         blob.features.downloadSubtitleDeselectedLanguages?.let(DownloadsRepository::replaceDeselectedSubtitleLanguages)
+        blob.features.downloadOfflineHome?.let(DownloadsRepository::setOfflineDownloadsHome)
 
         DebridSettingsStorage.replaceFromSyncPayload(
             preservingLocalProfileCredentials(
@@ -402,6 +405,7 @@ private data class MobileProfileSettingsFeatures(
     @SerialName("player_settings") val playerSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("stream_badge_settings") val streamBadgeSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("download_subtitle_deselected_languages") val downloadSubtitleDeselectedLanguages: List<String>? = null,
+    @SerialName("download_offline_home") val downloadOfflineHome: Boolean? = null,
     @SerialName("debrid_settings") val debridSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("tmdb_settings") val tmdbSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("mdblist_settings") val mdbListSettings: JsonObject = JsonObject(emptyMap()),

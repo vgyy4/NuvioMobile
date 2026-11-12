@@ -75,7 +75,20 @@ object NetworkStatusRepository {
     fun ensureStarted() {
         if (started) return
         started = true
+        // The system tells us when the connection comes or goes, so there is no polling.
+        NetworkPathMonitor.start(::onNetworkPathChanged)
         requestRefresh(force = true)
+    }
+
+    private fun onNetworkPathChanged(connected: Boolean) {
+        if (!connected) {
+            // No network at all: nothing to probe, switch immediately.
+            _uiState.value = NetworkStatusUiState(condition = NetworkCondition.NoInternet)
+        } else {
+            // A network is available again: confirm once that the internet is really reachable
+            // (a captive portal or a dead router would still count as a "path").
+            requestRefresh(force = true)
+        }
     }
 
     fun requestForegroundRefresh() {
