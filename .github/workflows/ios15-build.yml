@@ -111,18 +111,29 @@ jobs:
           restore-keys: |
             konan-${{ runner.os }}-${{ runner.arch }}-
 
-      # Gradle requires local.properties to exist. Upstream supplies it from a
-      # secret; without one the file is empty and all runtime keys (Supabase,
-      # TMDB, Sentry) default to blank.
+      # Gradle requires local.properties to exist. Use the secret if it provides a
+      # Supabase key; otherwise fetch the official server's public connection
+      # details (URL + anon key) from its discovery endpoint, so sign-in works.
       - name: Configure runtime properties
         working-directory: NuvioMobile
         run: |
+          : > local.properties
           if [[ -n "${RELEASE_PROPERTIES_BASE64}" ]]; then
             printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
             sed -i '' -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
-          else
-            : > local.properties
           fi
+          if ! grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties; then
+            echo "No Supabase key in secret; using official server discovery document"
+            curl -fsS --retry 3 https://api.nuvio.tv/.well-known/nuvio | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          print("NUVIO_SUPABASE_URL=" + d["backend_url"])
+          print("NUVIO_SUPABASE_ANON_KEY=" + d["publishable_key"])
+          print("NUVIO_SUPABASE_FALLBACK_URL=https://api-two.nuvioapp.space")
+          ' >> local.properties
+          fi
+          grep -Eq '^NUVIO_SUPABASE_URL=.+' local.properties
+          grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties
 
       - name: Prepare iOS dependencies
         working-directory: NuvioMobile
