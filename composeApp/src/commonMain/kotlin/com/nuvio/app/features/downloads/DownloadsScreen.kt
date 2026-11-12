@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListScope
@@ -23,21 +24,28 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.i18n.localizedByteUnit
+import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.core.ui.PosterZoomAnchor
+import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.posterCardClickable
 import com.nuvio.app.features.home.components.HomeContinueWatchingSection
 import com.nuvio.app.features.home.components.HomeContinueWatchingSectionBottomPadding
@@ -49,6 +57,8 @@ import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepositor
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesUiState
 import com.nuvio.app.features.watchprogress.WatchProgressRepository
 import com.nuvio.app.features.watchprogress.continueWatchingItemKey
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
@@ -60,6 +70,7 @@ fun DownloadsScreen(
     initialShowId: String? = null,
     onNavigateToShow: ((showId: String, title: String) -> Unit)? = null,
     onBackFromShow: (() -> Unit)? = null,
+    onOpenDetails: ((type: String, id: String, title: String) -> Unit)? = null,
 ) {
     val uiState by remember {
         DownloadsRepository.ensureLoaded()
@@ -85,6 +96,7 @@ fun DownloadsScreen(
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
     val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
+    val networkStatusUiState by NetworkStatusRepository.uiState.collectAsStateWithLifecycle()
     val continueEntries = remember(uiState.completedItems, homeContinueWatching, continueWatchingPreferences.isVisible) {
         if (continueWatchingPreferences.isVisible) {
             downloadedContinueWatchingEntries(homeContinueWatching, uiState.completedItems)
@@ -98,7 +110,20 @@ fun DownloadsScreen(
 
     var selectedShowId by rememberSaveable(initialShowId) { mutableStateOf(initialShowId) }
     var downloadPendingDeletionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var deleteRequest by remember { mutableStateOf<DeleteDownloadsRequest?>(null) }
+    var menuTarget by remember { mutableStateOf<DownloadsMenuTarget?>(null) }
+    var menuAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
+    val menuHazeState = rememberHazeState()
+    val hapticFeedback = LocalHapticFeedback.current
+    val coroutineScope = rememberCoroutineScope()
     val openDownloadsDirectoryFailedText = stringResource(Res.string.downloads_open_directory_failed)
+
+    // Same hand-off as Home: the long-pressed card stashes its geometry, the menu zooms from it.
+    val openMenu: (DownloadsMenuTarget) -> Unit = { target ->
+        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+        menuAnchor = PosterZoomAnchorHolder.consume()
+        menuTarget = target
+    }
 
     // Progress ticks replace `uiState.items` several times a second; sorting only depends on the
     // completed downloads, which do not change while others are still downloading.
@@ -117,80 +142,136 @@ fun DownloadsScreen(
         }
     }
 
-    NuvioScreen(horizontalPadding = 0.dp) {
-        stickyHeader {
-            NuvioScreenHeader(
-                title = if (selectedShowId == null) {
-                    stringResource(Res.string.compose_settings_root_downloads_title)
-                } else {
-                    selectedShowTitle ?: stringResource(Res.string.downloads_show_downloads)
-                },
-                modifier = Modifier.padding(horizontal = 16.dp),
-                onBack = if (selectedShowId == null && !showBack) {
-                    null
-                } else {
-                    {
-                        if (selectedShowId != null) {
-                            onBackFromShow?.invoke() ?: run { selectedShowId = null }
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (menuTarget != null) {
+                        Modifier.hazeSource(state = menuHazeState)
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            NuvioScreen(horizontalPadding = 0.dp) {
+                stickyHeader {
+                    NuvioScreenHeader(
+                        title = if (selectedShowId == null) {
+                            stringResource(Res.string.compose_settings_root_downloads_title)
                         } else {
-                            onBack()
-                        }
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            if (!DownloadsPlatformDownloader.openDownloadsDirectory()) {
-                                NuvioToastController.show(openDownloadsDirectoryFailedText)
+                            selectedShowTitle ?: stringResource(Res.string.downloads_show_downloads)
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        onBack = if (selectedShowId == null && !showBack) {
+                            null
+                        } else {
+                            {
+                                if (selectedShowId != null) {
+                                    onBackFromShow?.invoke() ?: run { selectedShowId = null }
+                                } else {
+                                    onBack()
+                                }
                             }
                         },
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Folder,
-                            contentDescription = stringResource(Res.string.downloads_open_directory),
-                        )
-                    }
-                },
-            )
+                        actions = {
+                            IconButton(
+                                onClick = {
+                                    if (!DownloadsPlatformDownloader.openDownloadsDirectory()) {
+                                        NuvioToastController.show(openDownloadsDirectoryFailedText)
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Folder,
+                                    contentDescription = stringResource(Res.string.downloads_open_directory),
+                                )
+                            }
+                        },
+                    )
+                }
+
+                if (selectedShowId == null) {
+                    downloadsRootContent(
+                        uiState = uiState,
+                        continueItems = continueEntries.map(DownloadedContinueEntry::item),
+                        continuePreferences = continueWatchingPreferences,
+                        continueDataSourceKey = watchProgressUiState.source,
+                        movies = downloadedMovies,
+                        shows = downloadedShows,
+                        watchedKeys = watchedUiState.watchedKeys,
+                        fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                        onContinueClick = { item ->
+                            continueByKey[continueWatchingItemKey(item)]?.let { onOpenDownload(it.download) }
+                        },
+                        onContinueLongPress = { item ->
+                            continueByKey[continueWatchingItemKey(item)]?.let { entry ->
+                                openMenu(DownloadsMenuTarget.ContinueWatching(entry))
+                            }
+                        },
+                        onTitleClick = { downloaded ->
+                            if (downloaded.isShow) {
+                                onNavigateToShow?.invoke(downloaded.parentMetaId, downloaded.title)
+                                    ?: run { selectedShowId = downloaded.parentMetaId }
+                            } else {
+                                downloaded.downloads.firstOrNull()?.let(onOpenDownload)
+                            }
+                        },
+                        onTitleLongPress = { downloaded ->
+                            // Play continues what Home's Continue watching points at, else starts at the first file.
+                            val resumeEntry = continueEntries.firstOrNull { entry ->
+                                entry.download.parentMetaId == downloaded.parentMetaId
+                            }
+                            val playTarget = resumeEntry?.download ?: downloaded.downloads.firstOrNull()
+                            if (playTarget != null) {
+                                openMenu(
+                                    DownloadsMenuTarget.Title(
+                                        title = downloaded,
+                                        playTarget = playTarget,
+                                        resumes = resumeEntry != null && !resumeEntry.item.isNextUp,
+                                    ),
+                                )
+                            }
+                        },
+                        onOpenDownload = onOpenDownload,
+                        onDeleteDownload = { downloadPendingDeletionId = it },
+                    )
+                } else {
+                    downloadsShowContent(
+                        showId = selectedShowId.orEmpty(),
+                        episodes = completedEpisodes,
+                        onOpenDownload = onOpenDownload,
+                        onEpisodeLongPress = { episode -> openMenu(DownloadsMenuTarget.Episode(episode)) },
+                        onDeleteDownload = { downloadPendingDeletionId = it },
+                    )
+                }
+            }
         }
 
-        if (selectedShowId == null) {
-            downloadsRootContent(
-                uiState = uiState,
-                continueItems = continueEntries.map(DownloadedContinueEntry::item),
-                continuePreferences = continueWatchingPreferences,
-                continueDataSourceKey = watchProgressUiState.source,
-                movies = downloadedMovies,
-                shows = downloadedShows,
-                watchedKeys = watchedUiState.watchedKeys,
-                fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
-                onContinueClick = { item ->
-                    continueByKey[continueWatchingItemKey(item)]?.let { onOpenDownload(it.download) }
-                },
-                onContinueLongPress = {},
-                onTitleClick = { downloaded ->
-                    if (downloaded.isShow) {
-                        onNavigateToShow?.invoke(downloaded.parentMetaId, downloaded.title)
-                            ?: run { selectedShowId = downloaded.parentMetaId }
-                    } else {
-                        downloaded.downloads.firstOrNull()?.let(onOpenDownload)
-                    }
-                },
-                onTitleLongPress = {},
-                onOpenDownload = onOpenDownload,
-                onDeleteDownload = { downloadPendingDeletionId = it },
-            )
-        } else {
-            downloadsShowContent(
-                showId = selectedShowId.orEmpty(),
-                episodes = completedEpisodes,
-                onOpenDownload = onOpenDownload,
-                onEpisodeLongPress = {},
-                onDeleteDownload = { downloadPendingDeletionId = it },
-            )
+        menuTarget?.let { target ->
+            key(target) {
+                DownloadsActionOverlay(
+                    target = target,
+                    anchor = menuAnchor,
+                    hazeState = menuHazeState,
+                    isOnline = networkStatusUiState.isOnline,
+                    continueWatchingPreferences = continueWatchingPreferences,
+                    watchedKeys = watchedUiState.watchedKeys,
+                    fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                    scope = coroutineScope,
+                    onPlay = onOpenDownload,
+                    onOpenDetails = onOpenDetails,
+                    onDelete = { request -> deleteRequest = request },
+                    onDismissed = {
+                        menuTarget = null
+                        menuAnchor = null
+                    },
+                )
+            }
         }
     }
 
+    DeleteDownloadsHost(deleteRequest) { deleteRequest = null }
 
     val pendingDeletionId = downloadPendingDeletionId
     if (pendingDeletionId != null) {

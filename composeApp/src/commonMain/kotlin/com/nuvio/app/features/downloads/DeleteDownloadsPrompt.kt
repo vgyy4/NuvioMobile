@@ -5,7 +5,7 @@ import com.nuvio.app.core.ui.NuvioStatusModal
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
-internal enum class DeleteDownloadsKind { Episode, Movie, Season }
+internal enum class DeleteDownloadsKind { Episode, Movie, Season, Show }
 
 /** What the user asked to delete from a context menu, shown for confirmation first. */
 internal class DeleteDownloadsRequest(
@@ -23,9 +23,10 @@ internal fun DeleteDownloadsHost(request: DeleteDownloadsRequest?, onDismiss: ()
                 DeleteDownloadsKind.Episode -> Res.string.delete_download_episode_title
                 DeleteDownloadsKind.Movie -> Res.string.delete_download_movie_title
                 DeleteDownloadsKind.Season -> Res.string.delete_download_season_title
+                DeleteDownloadsKind.Show -> Res.string.delete_download_show_title
             },
         ),
-        message = if (request.kind == DeleteDownloadsKind.Season) {
+        message = if (request.kind == DeleteDownloadsKind.Season || request.kind == DeleteDownloadsKind.Show) {
             stringResource(Res.string.delete_download_season_message, request.downloadIds.size)
         } else {
             stringResource(Res.string.delete_download_message)
@@ -48,5 +49,6 @@ internal fun deleteDownloadLabel(kind: DeleteDownloadsKind): String = stringReso
         DeleteDownloadsKind.Episode -> Res.string.delete_download_episode
         DeleteDownloadsKind.Movie -> Res.string.delete_download_movie
         DeleteDownloadsKind.Season -> Res.string.delete_download_season
+        DeleteDownloadsKind.Show -> Res.string.delete_download_show
     },
 )
