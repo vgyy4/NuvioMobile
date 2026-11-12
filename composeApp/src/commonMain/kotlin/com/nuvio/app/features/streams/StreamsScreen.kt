@@ -391,7 +391,7 @@ fun StreamsScreen(
                         episodeThumbnail = episodeThumbnail,
                         stream = stream,
                     )
-                    NuvioToastController.show(result.toastMessage())
+                    downloadScope.launch { NuvioToastController.show(result.toastMessage()) }
                 }
             },
             onOpen = { stream, openExternally ->

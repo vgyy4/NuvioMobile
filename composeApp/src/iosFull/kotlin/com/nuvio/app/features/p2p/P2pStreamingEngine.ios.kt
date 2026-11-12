@@ -70,7 +70,7 @@ import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSLog
 import platform.Foundation.NSProcessInfo
 
-private const val StatsPollIntervalMs = 250L
+private const val StatsPollIntervalMs = 500L
 private const val StartupStatsPollIntervalMs = 1_000L
 private const val CacheStatsPollIntervalMs = 1_000L
 // Devices with <= 2.5 GiB of RAM (iPad Air 2, iPhone 6s/7/8 ...) get a smaller in-memory
