@@ -26,9 +26,45 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.nuvio.app.core.i18n.localizedSeasonEpisodeCode
+import com.nuvio.app.features.watchprogress.ContinueWatchingItem
 
-/** A downloaded video that was started but not finished, with how far it got (0..1). */
+/** A downloaded video that Home lists in Continue watching, with how far it got (0..1). */
 internal class DownloadedContinueEntry(val item: DownloadItem, val progress: Float)
+
+/**
+ * Keeps the entries of Home's Continue watching list whose video is downloaded, in Home's order.
+ * A next-up entry therefore only shows when the next episode itself is downloaded.
+ */
+internal fun downloadedContinueWatchingEntries(
+    continueWatching: List<ContinueWatchingItem>,
+    completedDownloads: List<DownloadItem>,
+): List<DownloadedContinueEntry> {
+    val playable = completedDownloads.filter(DownloadItem::isPlayable)
+    return continueWatching.mapNotNull { entry ->
+        val download = playable.downloadedVideoFor(entry) ?: return@mapNotNull null
+        DownloadedContinueEntry(download, entry.progressFraction)
+    }.distinctBy { it.item.id }
+}
+
+/** The downloaded file of the video a Continue watching entry points at (same rules as playback). */
+internal fun List<DownloadItem>.downloadedVideoFor(entry: ContinueWatchingItem): DownloadItem? {
+    val videoId = entry.videoId.trim()
+    if (videoId.isNotBlank()) {
+        firstOrNull { it.videoId == videoId }?.let { return it }
+    }
+    val parentMetaId = entry.parentMetaId.trim()
+    return if (entry.seasonNumber != null && entry.episodeNumber != null) {
+        firstOrNull {
+            it.parentMetaId == parentMetaId &&
+                it.seasonNumber == entry.seasonNumber &&
+                it.episodeNumber == entry.episodeNumber
+        }
+    } else {
+        firstOrNull {
+            it.parentMetaId == parentMetaId && it.seasonNumber == null && it.episodeNumber == null
+        }
+    }
+}
 
 @Composable
 internal fun DownloadsContinueWatchingRow(

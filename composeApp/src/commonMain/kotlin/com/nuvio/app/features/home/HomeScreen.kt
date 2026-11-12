@@ -223,12 +223,9 @@ fun HomeScreen(
         watchProgressUiState.hiddenContentIds,
         continueWatchingCutoffEpochMs,
     ) {
-        val visibleProviderEntries = watchProgressUiState.entries.filterNot { entry ->
-            entry.parentMetaId in watchProgressUiState.hiddenContentIds ||
-                WatchProgressRepository.isDroppedShow(entry.parentMetaId)
-        }
-        filterEntriesForContinueWatchingWindow(
-            entries = visibleProviderEntries,
+        homeEffectiveProgressEntries(
+            entries = watchProgressUiState.entries,
+            hiddenContentIds = watchProgressUiState.hiddenContentIds,
             cutoffEpochMs = continueWatchingCutoffEpochMs,
         )
     }
@@ -298,18 +295,10 @@ fun HomeScreen(
     }
 
     val nextUpSuppressedSeriesIds = remember(visibleContinueWatchingEntries, latestCompletedAtBySeries) {
-        visibleContinueWatchingEntries
-            .asSequence()
-            .filter { entry -> entry.parentMetaType.isSeriesTypeForContinueWatching() }
-            .filter { entry ->
-                shouldTreatAsActiveInProgressForNextUpSuppression(
-                    progress = entry,
-                    latestCompletedAt = latestCompletedAtBySeries[entry.parentMetaId],
-                )
-            }
-            .map { entry -> entry.parentMetaId }
-            .filter(String::isNotBlank)
-            .toSet()
+        homeNextUpSuppressedSeriesIds(
+            visibleEntries = visibleContinueWatchingEntries,
+            latestCompletedAtBySeries = latestCompletedAtBySeries,
+        )
     }
 
     val completedSeriesCandidates = remember(recentNextUpSeedCandidates, nextUpSuppressedSeriesIds) {
@@ -397,76 +386,29 @@ fun HomeScreen(
         watchedUiState.isLoaded,
         watchProgressUiState.hiddenContentIds,
     ) {
-        val nowEpochMs = WatchProgressClock.nowEpochMs()
-        cachedNextUpReleases.mapNotNull { cachedRelease ->
-            val cached = cachedRelease.item
-            if (
-                shouldValidateMissingNextUpSeeds &&
-                cached.contentId !in activeNextUpSeedContentIds
-            ) {
-                return@mapNotNull null
-            }
-            val currentSeed = currentNextUpSeedByContentId[cached.contentId]
-            if (currentSeed != null) {
-                val (currentSeason, currentEpisode) = currentSeed
-                if (
-                    hasHomeNextUpSeedChangedFromCache(
-                        currentSeason = currentSeason,
-                        currentEpisode = currentEpisode,
-                        cachedSeason = cached.seedSeason,
-                        cachedEpisode = cached.seedEpisode,
-                    )
-                ) {
-                    return@mapNotNull null
-                }
-            }
-            if (
-                progressProviderOwnsCompletedHistory &&
-                watchProgressUiState.hasLoadedRemoteProgress &&
-                cached.contentId in processedNextUpContentIds &&
-                cached.contentId !in nextUpItemsBySeries.keys
-            ) {
-                return@mapNotNull null
-            }
-            if (nextUpDismissKey(cached.contentId, cached.seedSeason, cached.seedEpisode) in continueWatchingPreferences.dismissedNextUpKeys) {
-                return@mapNotNull null
-            }
-            val releaseEpochMs = cachedRelease.epochMs()
-            if (
-                !cachedNextUpHasAired(cached, nowEpochMs, releaseEpochMs) &&
-                !continueWatchingPreferences.showUnairedNextUp
-            ) {
-                return@mapNotNull null
-            }
-            if (
-                cached.contentId in watchProgressUiState.hiddenContentIds ||
-                WatchProgressRepository.isDroppedShow(cached.contentId)
-            ) {
-                return@mapNotNull null
-            }
-            val item = cached.toContinueWatchingItem(releaseEpochMs, nowEpochMs)
-            val sortTimestamp = if (item.isReleaseAlert) {
-                releaseEpochMs ?: cached.lastWatched
-            } else {
-                cached.lastWatched
-            }
-            cached.contentId to (sortTimestamp to item)
-        }.toMap()
+        homeCachedNextUpItems(
+            cachedNextUpReleases = cachedNextUpReleases,
+            shouldValidateMissingNextUpSeeds = shouldValidateMissingNextUpSeeds,
+            activeNextUpSeedContentIds = activeNextUpSeedContentIds,
+            currentNextUpSeedByContentId = currentNextUpSeedByContentId,
+            progressProviderOwnsCompletedHistory = progressProviderOwnsCompletedHistory,
+            hasLoadedRemoteProgress = watchProgressUiState.hasLoadedRemoteProgress,
+            processedNextUpContentIds = processedNextUpContentIds,
+            resolvedNextUpContentIds = nextUpItemsBySeries.keys,
+            dismissedNextUpKeys = continueWatchingPreferences.dismissedNextUpKeys,
+            showUnairedNextUp = continueWatchingPreferences.showUnairedNextUp,
+            hiddenContentIds = watchProgressUiState.hiddenContentIds,
+        )
     }
     val cachedInProgressItems = remember(
         cachedSnapshots.second,
         effectiveWatchProgressSource,
         watchProgressUiState.hiddenContentIds,
     ) {
-        cachedSnapshots.second.mapNotNull { cached ->
-            if (
-                cached.contentId in watchProgressUiState.hiddenContentIds ||
-                WatchProgressRepository.isDroppedShow(cached.contentId)
-            ) {
-                return@mapNotNull null
-            }
-            cached.resolvedProgressKey() to cached.toContinueWatchingItem()
-        }.toMap()
+        homeCachedInProgressItems(
+            cachedInProgress = cachedSnapshots.second,
+            hiddenContentIds = watchProgressUiState.hiddenContentIds,
+        )
     }
 
     val effectivNextUpItems = remember(
@@ -1566,7 +1508,7 @@ private fun MetaDetails.videoForSeriesAction(action: SeriesPrimaryAction): MetaV
     }
 }
 
-private fun shouldTreatAsActiveInProgressForNextUpSuppression(
+internal fun shouldTreatAsActiveInProgressForNextUpSuppression(
     progress: WatchProgressEntry,
     latestCompletedAt: Long?,
 ): Boolean {
@@ -1872,7 +1814,7 @@ internal fun CompletedSeriesCandidate.toContinueWatchingSeed(meta: com.nuvio.app
 private fun ContinueWatchingItem.shouldDisplayInContinueWatching(): Boolean =
     isNextUp || progressFraction < 0.995f
 
-private fun CachedNextUpItem.toContinueWatchingItem(
+internal fun CachedNextUpItem.toContinueWatchingItem(
     releaseEpochMs: Long?,
     nowEpochMs: Long,
 ): ContinueWatchingItem {
@@ -1919,7 +1861,7 @@ private fun CachedNextUpItem.toContinueWatchingItem(
     )
 }
 
-private fun CachedInProgressItem.toContinueWatchingItem(): ContinueWatchingItem {
+internal fun CachedInProgressItem.toContinueWatchingItem(): ContinueWatchingItem {
     val explicitResumeProgressFraction = progressPercent
         ?.takeIf { duration <= 0L && it > 0f }
         ?.let { (it / 100f).coerceIn(0f, 1f) }
