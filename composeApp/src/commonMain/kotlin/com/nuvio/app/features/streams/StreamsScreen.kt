@@ -71,7 +71,6 @@ import com.nuvio.app.core.ui.dismissNuvioBottomSheet
 import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.core.ui.rememberArtworkBackdrop
 import com.nuvio.app.features.downloads.DownloadEnqueueResult
-import com.nuvio.app.features.downloads.DownloadSubtitleMode
 import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -170,11 +169,11 @@ fun StreamsScreen(
     var streamActionsTarget by remember(videoId) { mutableStateOf<StreamItem?>(null) }
     val downloadScope = rememberCoroutineScope()
 
-    var subtitlePrompt by remember { mutableStateOf<DownloadSubtitlePrompt?>(null) }
+    var optionsPrompt by remember { mutableStateOf<DownloadOptionsPrompt?>(null) }
 
-    // Starts the download of [stream]: resolves debrid links, asks about subtitles when the
-    // settings say so, then queues it. Returns true if the download was started. The screen's
-    // scope is cancelled when it goes away, so callers that leave wait for the result first.
+    // Starts the download of [stream]: resolves debrid links, asks which extras to download with
+    // the video, then queues it. Returns true if the download was started. The screen's scope is
+    // cancelled when it goes away, so callers that leave wait for the result first.
     fun startStreamDownload(stream: StreamItem): Deferred<Boolean> = downloadScope.async {
         val target: StreamItem = if (DirectDebridPlaybackResolver.shouldResolveToPlayableStream(stream)) {
             val resolved = DirectDebridPlaybackResolver.resolveToPlayableStream(
@@ -193,25 +192,20 @@ fun StreamsScreen(
             stream
         }
 
-        val includeSubtitles = when (DownloadsRepository.preferences.value.subtitleMode) {
-            DownloadSubtitleMode.Never -> false
-            DownloadSubtitleMode.Always -> true
-            DownloadSubtitleMode.Ask -> {
-                val languages = DownloadsRepository.previewSubtitleLanguages(type, videoId, target)
-                if (languages.isEmpty()) {
-                    false
-                } else {
-                    val prompt = DownloadSubtitlePrompt(languages)
-                    subtitlePrompt = prompt
-                    val answer = try {
-                        prompt.answer.await()
-                    } finally {
-                        subtitlePrompt = null
-                    }
-                    // Dismissing the question cancels the download.
-                    answer ?: return@async false
-                }
+        // Nothing to ask when there are no subtitles to offer.
+        val available = DownloadsRepository.previewSubtitleLanguages(type, videoId, target)
+        val chosenSubtitles: List<String> = if (available.isEmpty()) {
+            emptyList()
+        } else {
+            val prompt = DownloadOptionsPrompt(available)
+            optionsPrompt = prompt
+            val answer = try {
+                prompt.answer.await()
+            } finally {
+                optionsPrompt = null
             }
+            // Dismissing the question cancels the download.
+            answer ?: return@async false
         }
 
         val result = DownloadsRepository.enqueueFromStream(
@@ -228,13 +222,15 @@ fun StreamsScreen(
             episodeTitle = episodeTitle,
             episodeThumbnail = episodeThumbnail,
             stream = target,
-            downloadSubtitles = includeSubtitles,
+            downloadSubtitles = chosenSubtitles.isNotEmpty(),
+            // Empty means "every language": used when all of them were kept.
+            subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
         )
         NuvioToastController.show(result.toastMessage())
         result == DownloadEnqueueResult.Started || result == DownloadEnqueueResult.Replaced
     }
 
-    subtitlePrompt?.let { DownloadSubtitlePromptDialog(it) }
+    optionsPrompt?.let { DownloadOptionsDialog(it) }
 
     var preferredFilterApplied by remember(videoId) { mutableStateOf(false) }
     val episodeProgress = watchProgressUiState.progressForVideo(

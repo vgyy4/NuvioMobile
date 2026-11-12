@@ -78,7 +78,6 @@ import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.NuvioToastHost
 import com.nuvio.app.core.ui.PosterZoomAnchor
-import com.nuvio.app.core.ui.DevicePerformance
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
 import com.nuvio.app.core.ui.PosterZoomOverlayExitAnimation
@@ -1357,9 +1356,7 @@ internal fun MainAppContent(
                 modifier = Modifier
                     .fillMaxSize()
                     .then(
-                        if (!DevicePerformance.isLowEnd &&
-                            (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null)
-                        ) {
+                        if (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null) {
                             Modifier.hazeSource(state = posterOverlayHazeState)
                         } else {
                             Modifier

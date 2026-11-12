@@ -3,6 +3,9 @@ package com.nuvio.app.core.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.getValue
@@ -18,6 +21,8 @@ import androidx.compose.ui.graphics.GraphicsContext
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalGraphicsContext
@@ -72,52 +77,54 @@ internal fun Modifier.posterCardClickable(
     zoomImageUrl: String? = null,
     zoomCornerRadius: Dp = NuvioTokens.Radius.poster,
 ): Modifier {
-    // The lift animation needs every poster to render a second, hidden copy of itself on every
-    // redraw. That is real GPU work for every poster on screen, so devices that cannot spare it
-    // skip it: posters there open without the lift/zoom, and the long-press menu uses a plain
-    // image instead.
-    val liftEnabled = !DevicePerformance.isLowEnd
     val graphicsContext = LocalGraphicsContext.current
-    val source = if (liftEnabled) {
-        remember(graphicsContext, zoomImageUrl) { PosterLiftSource(graphicsContext) }
-    } else {
-        null
-    }
-    val bounds = remember { PosterBounds() }
+    val source = remember(graphicsContext, zoomImageUrl) { PosterLiftSource(graphicsContext) }
     val onPosterClickAnchor = LocalPosterClickAnchor.current
+    // The lift animation shows a copy of the poster. That copy used to be re-recorded on every
+    // redraw of every poster on screen, a constant cost. It is only needed once the card is
+    // touched, so it is recorded from the moment a finger lands on the card; the recording is
+    // kept afterwards for as long as the animation needs it.
+    val touched = remember { mutableStateOf(false) }
     val posterModifier = Modifier
-        .then(
-            if (source != null) {
-                Modifier.drawWithContent {
-                    source.layer.record { this@drawWithContent.drawContent() }
-                    if (!source.isLifted) drawLayer(source.layer)
+        .pointerInput(Unit) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                touched.value = true
+                try {
+                    waitForUpOrCancellation(pass = PointerEventPass.Initial)
+                } finally {
+                    touched.value = false
                 }
-            } else {
-                Modifier
-            },
-        )
+            }
+        }
+        .drawWithContent {
+            if (touched.value) {
+                source.layer.record { this@drawWithContent.drawContent() }
+                if (!source.isLifted) drawLayer(source.layer)
+            } else if (!source.isLifted) {
+                drawContent()
+            }
+        }
         .onGloballyPositioned { coordinates ->
             val position = coordinates.positionInRoot()
-            val rect = Rect(
+            source.bounds = Rect(
                 left = position.x,
                 top = position.y,
                 right = position.x + coordinates.size.width,
                 bottom = position.y + coordinates.size.height,
             )
-            bounds.value = rect
-            source?.bounds = rect
         }
         .then(this)
     if (onClick == null && onLongClick == null) return posterModifier
     return posterModifier
         .combinedClickable(
             interactionSource = null,
-            indication = if (onPosterClickAnchor == null || !liftEnabled) LocalIndication.current else null,
+            indication = if (onPosterClickAnchor == null) LocalIndication.current else null,
             onClick = {
                 if (onClick != null) {
-                    bounds.value?.let { cardBounds ->
+                    source.bounds?.let { bounds ->
                         onPosterClickAnchor?.invoke(
-                            PosterZoomAnchor(cardBounds, zoomImageUrl, zoomCornerRadius).also { it.source = source },
+                            PosterZoomAnchor(bounds, zoomImageUrl, zoomCornerRadius).also { it.source = source },
                         )
                     }
                     onClick()
@@ -125,7 +132,7 @@ internal fun Modifier.posterCardClickable(
             },
             onLongClick = onLongClick?.let { longClick ->
                 {
-                    bounds.value?.let { cardBounds ->
+                    source.bounds?.let { cardBounds ->
                         PosterZoomAnchorHolder.stash(
                             PosterZoomAnchor(cardBounds, zoomImageUrl, zoomCornerRadius).also {
                                 it.source = source
@@ -136,10 +143,6 @@ internal fun Modifier.posterCardClickable(
                 }
             },
         )
-}
-
-private class PosterBounds {
-    var value: Rect? = null
 }
 
 internal fun DrawScope.drawLiftedPoster(source: PosterLiftSource) {

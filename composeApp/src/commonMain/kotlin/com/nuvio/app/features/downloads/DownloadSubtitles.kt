@@ -22,6 +22,8 @@ internal object DownloadSubtitles {
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun prepare(item: DownloadItem, localVideoUri: String): Unit = withContext(Dispatchers.Default) {
+        // Skip times are saved with every download, whatever the subtitle choice is.
+        DownloadSkipTimes.prepare(item, localVideoUri)
         // The user chose not to download subtitles for this item.
         if (!item.downloadSubtitles) return@withContext
         val storage = DownloadSubtitleStorage(localVideoUri)

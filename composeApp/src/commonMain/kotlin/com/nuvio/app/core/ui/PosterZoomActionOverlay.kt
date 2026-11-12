@@ -251,30 +251,28 @@ fun NuvioPosterZoomActionOverlay(
         val menuWidth = min(280.dp, maxWidth - NuvioTokens.Space.s48)
         val columnWidth = max(posterWidth, menuWidth)
 
-        // A full-screen live blur is the most expensive thing this overlay does. On low-end
-        // devices it makes the menu appear late and skips the opening animation, so use a
-        // plain, darker scrim there instead. Other devices are unchanged.
-        val lowEnd = DevicePerformance.isLowEnd
-        if (!lowEnd) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .hazeEffect(state = hazeState) {
-                        blurRadius = 36.dp
-                        inputScale = HazeInputScale.Auto
-                        noiseFactor = 0f
-                        blurredEdgeTreatment = BlurredEdgeTreatment.Rectangle
-                        clipToAreasBounds = false
-                        expandLayerBounds = true
-                        alpha = scrim.value.coerceIn(0f, 1f)
-                    },
-            )
-        }
+        // The blur input is shrunk before blurring (that is what keeps a 36 dp blur cheap). At that
+        // radius a quarter-resolution input is visually indistinguishable, and costs a fraction on
+        // older GPUs, so low-end devices pin it there. Other devices keep the automatic choice.
+        val blurInputScale = if (DevicePerformance.isLowEnd) HazeInputScale.Fixed(0.25f) else HazeInputScale.Auto
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .hazeEffect(state = hazeState) {
+                    blurRadius = 36.dp
+                    inputScale = blurInputScale
+                    noiseFactor = 0f
+                    blurredEdgeTreatment = BlurredEdgeTreatment.Rectangle
+                    clipToAreasBounds = false
+                    expandLayerBounds = true
+                    alpha = scrim.value.coerceIn(0f, 1f)
+                },
+        )
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
-                    Color.Black.copy(alpha = (if (lowEnd) 0.72f else 0.45f) * scrim.value.coerceIn(0f, 1f)),
+                    Color.Black.copy(alpha = 0.45f * scrim.value.coerceIn(0f, 1f)),
                 ),
         )
 
@@ -361,7 +359,7 @@ fun NuvioPosterZoomActionOverlay(
                         enabled = phase == PosterZoomPhase.Open,
                         onSelected = { select(action) },
                         modifier = Modifier.graphicsLayer {
-                            val stagger = if (lowEnd) 0f else index * 0.07f
+                            val stagger = index * 0.07f
                             val progress = ((menu.value.coerceIn(0f, 1f) - stagger) / (1f - stagger))
                                 .coerceIn(0f, 1f)
                             alpha = progress
@@ -406,8 +404,7 @@ fun NuvioPosterZoomActionOverlay(
                         },
                     )
                     clip = false
-                    // An animated blurred shadow is re-rendered every frame; skipped on low-end devices.
-                    shadowElevation = if (lowEnd) 0f else NuvioTokens.Space.s24.toPx() * clamped * shadowFade.value
+                    shadowElevation = NuvioTokens.Space.s24.toPx() * clamped * shadowFade.value
                 },
         ) {
             DisintegratingContainer(

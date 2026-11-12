@@ -5,6 +5,7 @@ import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.LocalFold
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.features.downloads.DownloadSkipTimes
 import com.nuvio.app.features.party.PartyRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.shuffle.EpisodeShuffleRepository
@@ -641,6 +642,12 @@ private fun PlayerScreenRuntime.BindPlayerMetadataAndSkipEffects() {
         val episode = activeEpisodeNumber
         val vid = activeVideoId
         if (!playerSettingsUiState.skipIntroEnabled) return@LaunchedEffect
+        // Downloaded content carries its own skip times, which also work without a connection.
+        DownloadSkipTimes.local(activeSourceUrl)?.takeIf { it.isNotEmpty() }?.let { saved ->
+            apiSkipIntervals = saved
+            recomputeMergedSkipIntervals()
+            return@LaunchedEffect
+        }
         if ((contentType ?: parentMetaType).equals("movie", ignoreCase = true)) {
             val api = SkipIntroRepository.getMovieSkipIntervals(parentMetaId, vid)
             apiSkipIntervals = api
