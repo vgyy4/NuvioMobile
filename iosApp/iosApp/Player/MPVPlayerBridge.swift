@@ -598,6 +598,9 @@ final class MPVPlayerViewController: UIViewController {
         // iOS can invalidate the VideoToolbox session (e.g. Notification Center during PiP).
         // FFmpeg recreates it at the next frames; keep hardware decoding meanwhile.
         checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "300"))
+        // After a cache underrun keep buffering for 4 s before resuming (mpv's default is 1 s,
+        // which stutters again right away on a slow link).
+        checkError(mpv_set_option_string(mpv, "cache-pause-wait", "4"))
         checkError(mpv_set_option_string(mpv, "ao", Self.defaultAudioOutput))
         checkError(mpv_set_option_string(mpv, "audio-channels", "auto"))
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "yes"))
