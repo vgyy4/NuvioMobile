@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.text.SpannableString
@@ -1747,8 +1748,9 @@ private class NuvioLibmpvView(
         mpv.setOptionString("ytdl", "no").logIfMpvError("ytdl")
         mpv.setOptionString("tls-verify", "yes")
         mpv.setOptionString("tls-ca-file", "${context.filesDir.path}/cacert.pem")
-        mpv.setOptionString("demuxer-max-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-bytes")
-        mpv.setOptionString("demuxer-max-back-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-back-bytes")
+        val lowRamDevice = isLowRamLibmpvDevice(context)
+        mpv.setOptionString("demuxer-max-bytes", "${libmpvForwardCacheBytes(lowRamDevice)}").logIfMpvError("demuxer-max-bytes")
+        mpv.setOptionString("demuxer-max-back-bytes", "${libmpvBackCacheBytes(lowRamDevice)}").logIfMpvError("demuxer-max-back-bytes")
         // After a cache underrun keep buffering for 4 s before resuming (mpv's default is 1 s).
         mpv.setOptionString("cache-pause-wait", "4").logIfMpvError("cache-pause-wait")
         // Room above 100% for the player's amplification (+10 dB is about 316%).
@@ -2232,8 +2234,21 @@ private data class LibmpvTrack(
 
 private const val LIBMPV_MAX_VOLUME_PERCENT = 400
 
-private fun libmpvCacheBytes(): Int =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 * 1024 * 1024 else 32 * 1024 * 1024
+private fun isLowRamLibmpvDevice(context: Context): Boolean {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        ?: return false
+    return activityManager.isLowRamDevice || activityManager.memoryClass <= 128
+}
+
+private fun libmpvForwardCacheBytes(lowRamDevice: Boolean): Int =
+    if (!lowRamDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+        64 * 1024 * 1024
+    } else {
+        32 * 1024 * 1024
+    }
+
+private fun libmpvBackCacheBytes(lowRamDevice: Boolean): Int =
+    if (lowRamDevice) 8 * 1024 * 1024 else 16 * 1024 * 1024
 
 private fun Int.logIfMpvError(option: String) {
     if (this < 0) Log.w(TAG, "libmpv option failed: $option status=$this")
