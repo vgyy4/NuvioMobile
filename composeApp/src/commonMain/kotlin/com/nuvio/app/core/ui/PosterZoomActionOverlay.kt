@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +65,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -77,6 +79,9 @@ data class PosterZoomAnchor(
     val cornerRadius: Dp,
 ) {
     internal var source: PosterLiftSource? = null
+
+    /** Size of the card (1 = full size) at the moment it was long-pressed; it is pressed in a little. */
+    internal var pressScale: Float = 1f
 }
 
 /**
@@ -182,8 +187,10 @@ fun NuvioPosterZoomActionOverlay(
         onDispose { source?.land() }
     }
 
-    LaunchedEffect(slotBounds != null, phase) {
-        if (slotBounds == null || phase != PosterZoomPhase.Open) return@LaunchedEffect
+    LaunchedEffect(Unit) {
+        // Waits for the first layout without a recomposition in between (it used to cost a frame).
+        snapshotFlow { slotBounds }.first { it != null }
+        if (phase != PosterZoomPhase.Open) return@LaunchedEffect
         lifted = source?.lift() == true
         showFallback = !lifted
         launch { scrim.animateTo(1f, tween(durationMillis = 260, easing = NuvioTokens.Motion.standard)) }
@@ -271,9 +278,11 @@ fun NuvioPosterZoomActionOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Color.Black.copy(alpha = 0.45f * scrim.value.coerceIn(0f, 1f)),
-                ),
+                // Drawn, not composed: reading the animation here would recompose the whole
+                // overlay (menu rows included) on every frame of the fade.
+                .drawBehind {
+                    drawRect(Color.Black.copy(alpha = 0.45f * scrim.value.coerceIn(0f, 1f)))
+                },
         )
 
         Column(
@@ -531,7 +540,8 @@ private fun lerp(start: Float, stop: Float, fraction: Float): Float =
     start + (stop - start) * fraction
 
 private fun posterStartBounds(anchor: PosterZoomAnchor?, slot: Rect): Rect =
-    anchor?.boundsInRoot ?: slot.scaleAboutCenter(0.85f)
+    anchor?.let { if (it.pressScale == 1f) it.boundsInRoot else it.boundsInRoot.scaleAboutCenter(it.pressScale) }
+        ?: slot.scaleAboutCenter(0.85f)
 
 private fun posterScale(anchor: PosterZoomAnchor?, slot: Rect, progress: Float): Float =
     lerp(posterStartBounds(anchor = anchor, slot = slot).width / slot.width, 1f, progress)
