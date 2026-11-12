@@ -360,9 +360,16 @@ actual fun PlatformPlayerSurface(
         latestOnControllerReady.value(autoSyncController)
     }
 
+    // The output settings are applied before each load; the settings effect below only re-applies
+    // when one of the output settings differs from what was last applied.
+    val videoOutputKey = playerSettings.iosVideoOutputKey()
+    val appliedVideoOutputKey = remember(bridge) { arrayOfNulls<List<Any>>(1) }
+
     // Load file and set initial state
     LaunchedEffect(bridge, sourceUrl, sourceAudioUrl, sourceHeaders, externalSubtitles) {
-        bridge.applyIosVideoOutputSettings(latestPlayerSettings.value)
+        val settings = latestPlayerSettings.value
+        bridge.applyIosVideoOutputSettings(settings)
+        appliedVideoOutputKey[0] = settings.iosVideoOutputKey()
         bridge.loadFileWithAudio(
             videoUrl = sourceUrl,
             audioUrl = sourceAudioUrl,
@@ -383,6 +390,14 @@ actual fun PlatformPlayerSurface(
         pollWake.trySend(Unit)
     }
 
+    // Re-apply only when a video/audio output setting changed, not on every player setting change.
+    LaunchedEffect(bridge, videoOutputKey) {
+        if (appliedVideoOutputKey[0] != videoOutputKey) {
+            bridge.applyIosVideoOutputSettings(playerSettings)
+            appliedVideoOutputKey[0] = videoOutputKey
+        }
+    }
+
     // Update resize mode
     LaunchedEffect(bridge, resizeMode) {
         bridge.setResizeMode(
@@ -392,10 +407,6 @@ actual fun PlatformPlayerSurface(
                 PlayerResizeMode.Zoom -> 2
             }
         )
-    }
-
-    LaunchedEffect(bridge, playerSettings) {
-        bridge.applyIosVideoOutputSettings(playerSettings)
     }
 
     // Polling for snapshots
@@ -502,6 +513,23 @@ actual fun PlatformPlayerSurface(
         }
     }
 }
+
+private fun PlayerSettingsUiState.iosVideoOutputKey(): List<Any> = listOf(
+    iosAudioOutputMode,
+    iosHardwareDecoderMode,
+    iosTargetColorspaceHintEnabled,
+    iosToneMappingMode,
+    iosHdrComputePeakEnabled,
+    iosTargetPrimaries,
+    iosTargetTransfer,
+    iosExtendedDynamicRangeEnabled,
+    iosDebandEnabled,
+    iosInterpolationEnabled,
+    iosBrightness,
+    iosContrast,
+    iosSaturation,
+    iosGamma,
+)
 
 private fun NuvioPlayerBridge.applyIosVideoOutputSettings(settings: PlayerSettingsUiState) {
     configureAudioOutput(audioOutput = settings.iosAudioOutputMode.mpvValue)
