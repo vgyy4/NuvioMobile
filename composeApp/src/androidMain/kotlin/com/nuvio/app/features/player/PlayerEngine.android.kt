@@ -60,6 +60,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ForwardingRenderer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -1015,7 +1016,14 @@ private fun ExoPlayerSurface(
                 }
 
                 override fun seekBy(offsetMs: Long) {
+                    // Relative skip taps may land on the nearest sync sample (faster, no preroll
+                    // decode). The seek parameters are read when the playback thread handles the
+                    // seek, and messages to it are ordered, so restoring EXACT right after posting
+                    // the seek keeps every other seek (absolute, resume, scrubbing, intro skip)
+                    // frame-accurate.
+                    exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                     exoPlayer.seekTo((exoPlayer.currentPosition + offsetMs).coerceAtLeast(0L))
+                    exoPlayer.setSeekParameters(SeekParameters.EXACT)
                 }
 
                 override fun retry() {
