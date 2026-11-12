@@ -33,6 +33,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +76,12 @@ internal fun StreamCard(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 68.dp)
+            .shadow(
+                elevation = 2.dp,
+                shape = cardShape,
+                ambientColor = Color.Black.copy(alpha = 0.04f),
+                spotColor = Color.Black.copy(alpha = 0.04f),
+            )
             .clip(cardShape)
             .background(
                 if (isCurrent) {

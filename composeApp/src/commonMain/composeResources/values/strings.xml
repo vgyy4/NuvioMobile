@@ -1690,6 +1690,7 @@
     <string name="streams_checking_more_addons">Checking more addons…</string>
     <string name="streams_copy_link">Copy stream link</string>
     <string name="streams_download_file">Download file</string>
+    <string name="download_action_label">Download</string>
     <string name="streams_open_external_player">Open in external player</string>
     <string name="streams_open_internal_player">Open in internal player</string>
     <string name="streams_empty_load_failed_message">The installed stream addons failed to return a valid stream response.</string>
@@ -1937,10 +1938,8 @@
     <string name="downloads_enqueue_unsupported_format">Unsupported stream format for downloads</string>
     <string name="downloads_enqueue_p2p_unsupported">Torrent downloads are not available on this device yet</string>
     <string name="downloads_enqueue_p2p_disabled">Turn on P2P streaming in Settings → Playback to download torrents</string>
-    <string name="downloads_enqueue_p2p_busy">Another torrent download is already running. Wait for it to finish or pause it first</string>
     <string name="downloads_p2p_unavailable">P2P streaming is turned off or unavailable</string>
     <string name="downloads_p2p_playback_active">A torrent is playing. Stop playback, then retry the download</string>
-    <string name="downloads_p2p_busy">Another torrent download is already running</string>
     <string name="downloads_p2p_no_peers">Could not connect to the torrent. It may have no seeders. Try again later</string>
     <string name="downloads_p2p_not_enough_space">Not enough free space. A torrent download needs about twice the file size while it runs (%1$s needed, %2$s free)</string>
     <string name="downloads_error_empty_body">Empty response body</string>
