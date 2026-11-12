@@ -1144,7 +1144,15 @@ final class MPVPlayerViewController: UIViewController {
         deactivateAudioSession()
         guard let ctx = mpv else { return }
         mpv = nil  // nil first so event loop stops reading
-        mpv_terminate_destroy(ctx)
+        // Every use of the handle on this object stops with the line above (all helpers guard on
+        // `mpv`). mpv_terminate_destroy blocks until the core and VO threads are down, so run it
+        // off the main thread. mpv still holds unretained pointers to this controller (wakeup
+        // callback context) and its metal layer (`wid`), so keep `self` alive until it returns
+        // and release it on the main thread (UIKit objects must not deinit elsewhere).
+        DispatchQueue.global(qos: .utility).async {
+            mpv_terminate_destroy(ctx)
+            DispatchQueue.main.async { withExtendedLifetime(self) {} }
+        }
     }
 
     private func activateAudioSessionForPlayback() {
