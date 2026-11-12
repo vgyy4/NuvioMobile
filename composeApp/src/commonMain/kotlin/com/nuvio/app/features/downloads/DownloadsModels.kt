@@ -90,21 +90,6 @@ data class DownloadItem(
         }
 }
 
-@Serializable
-enum class DownloadSubtitleMode {
-    /** Ask before each download whether to include the available subtitles. */
-    Ask,
-    Always,
-    Never,
-}
-
-@Serializable
-data class DownloadPreferences(
-    val subtitleMode: DownloadSubtitleMode = DownloadSubtitleMode.Ask,
-    /** Languages whose subtitles are downloaded; empty means every language. */
-    val subtitleLanguages: List<String> = emptyList(),
-)
-
 data class DownloadsUiState(
     val items: List<DownloadItem> = emptyList(),
 ) {

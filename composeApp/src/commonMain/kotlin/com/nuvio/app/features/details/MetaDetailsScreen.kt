@@ -93,7 +93,6 @@ import com.nuvio.app.core.ui.NuvioCardDepthSurface
 import com.nuvio.app.core.ui.NuvioPosterZoomActionOverlay
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.PosterZoomAnchor
-import com.nuvio.app.core.ui.DevicePerformance
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
 import com.nuvio.app.core.ui.ScreenActivityEffect
@@ -465,7 +464,7 @@ fun MetaDetailsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(
-                    if (!DevicePerformance.isLowEnd && selectedEpisodeZoomAnchor != null) {
+                    if (selectedEpisodeZoomAnchor != null) {
                         Modifier.hazeSource(state = episodeOverlayHazeState)
                     } else {
                         Modifier

@@ -44,9 +44,6 @@ object DownloadsRepository {
     private val _uiState = MutableStateFlow(DownloadsUiState())
     val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
 
-    private val _preferences = MutableStateFlow(DownloadPreferences())
-    val preferences: StateFlow<DownloadPreferences> = _preferences.asStateFlow()
-
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
@@ -78,30 +75,13 @@ object DownloadsRepository {
         activeHandles.clear()
         hasLoaded = false
         _hasUnseenCompleted.value = false
-        _preferences.value = DownloadPreferences()
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
     }
 
-    fun setSubtitleMode(mode: DownloadSubtitleMode) {
-        ensureLoaded()
-        if (_preferences.value.subtitleMode == mode) return
-        _preferences.value = _preferences.value.copy(subtitleMode = mode)
-        persist()
-    }
-
-    /** An empty list means every language. */
-    fun setSubtitleLanguages(languages: List<String>) {
-        ensureLoaded()
-        val normalized = languages.distinct()
-        if (_preferences.value.subtitleLanguages == normalized) return
-        _preferences.value = _preferences.value.copy(subtitleLanguages = normalized)
-        persist()
-    }
-
     /**
-     * The languages of the subtitles that [stream] offers (its own and the add-ons'), limited to
-     * the languages chosen in the settings. Empty when there is nothing to download.
+     * The languages of the subtitles that [stream] offers (its own and the add-ons'). Empty when
+     * there is nothing to download.
      */
     suspend fun previewSubtitleLanguages(
         contentType: String,
@@ -117,11 +97,9 @@ object DownloadsRepository {
         val addonLanguages = loadAddonSubtitles(
             addonSubtitleRequests(type = contentType, videoId = videoId, extras = extras),
         ).map { it.language }
-        val wanted = _preferences.value.subtitleLanguages.mapNotNull(::normalizeLanguageCode).toSet()
         return (stream.externalSubtitles.map { it.language } + addonLanguages)
             .mapNotNull(::normalizeLanguageCode)
             .distinct()
-            .filter { wanted.isEmpty() || it in wanted }
     }
 
     fun findPlayableDownloadByVideoId(videoId: String?): DownloadItem? {
@@ -201,6 +179,7 @@ object DownloadsRepository {
         episodeThumbnail: String?,
         stream: StreamItem,
         downloadSubtitles: Boolean = true,
+        subtitleLanguages: List<String> = emptyList(),
     ): DownloadEnqueueResult {
         ensureLoaded()
 
@@ -291,7 +270,7 @@ object DownloadsRepository {
             ),
             sourceSubtitles = stream.externalSubtitles,
             downloadSubtitles = downloadSubtitles,
-            subtitleLanguages = _preferences.value.subtitleLanguages,
+            subtitleLanguages = subtitleLanguages,
             p2pInfoHash = p2pInfoHash,
             p2pFileIdx = if (p2pInfoHash != null) stream.p2pFileIdx else null,
             p2pFilename = if (p2pInfoHash != null) stream.behaviorHints.filename else null,
@@ -424,12 +403,10 @@ object DownloadsRepository {
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
-            _preferences.value = DownloadPreferences()
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
-        _preferences.value = DownloadsCodec.decodePreferences(payload)
 
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
@@ -749,7 +726,7 @@ object DownloadsRepository {
 
     private fun persist() {
         DownloadsStorage.savePayload(
-            DownloadsCodec.encode(_uiState.value.items, _preferences.value),
+            DownloadsCodec.encodeItems(_uiState.value.items),
         )
     }
 
@@ -813,7 +790,6 @@ private sealed interface P2pDownloadOutcome {
 @Serializable
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
-    val preferences: DownloadPreferences = DownloadPreferences(),
 )
 
 private object DownloadsCodec {
@@ -827,16 +803,10 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).items
         }.getOrDefault(emptyList())
 
-    fun decodePreferences(payload: String): DownloadPreferences =
-        runCatching {
-            json.decodeFromString<StoredDownloadsPayload>(payload).preferences
-        }.getOrDefault(DownloadPreferences())
-
-    fun encode(items: Collection<DownloadItem>, preferences: DownloadPreferences): String =
+    fun encodeItems(items: Collection<DownloadItem>): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
-                preferences = preferences,
             ),
         )
 }
