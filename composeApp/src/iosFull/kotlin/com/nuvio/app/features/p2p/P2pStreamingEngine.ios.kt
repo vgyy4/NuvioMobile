@@ -65,12 +65,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSLog
 import platform.Foundation.NSProcessInfo
 
 private const val StatsPollIntervalMs = 250L
+private const val CacheReclaimTimeoutMs = 15_000L
 private const val StartupStatsPollIntervalMs = 1_000L
 private const val CacheStatsPollIntervalMs = 1_000L
 // Devices with <= 2.5 GiB of RAM (iPad Air 2, iPhone 6s/7/8 ...) get a smaller in-memory
@@ -248,10 +250,17 @@ actual object P2pStreamingEngine {
         val native = downloadStreams.remove(stream.id) ?: return@withLock
         val activeEngine = engine ?: return@withLock
         runCatching { stopNativeStream(activeEngine, native.id) }
-        // Streams still in use (playback or other downloads) are protected and stay.
-        runCatching { reclaimDiskCache(activeEngine) }
+        val engineIdle = downloadStreams.isEmpty() && currentStream == null
+        if (engineIdle) {
+            // The engine only reclaims cache while nothing is being read, so this is requested
+            // only when nothing else is active, and never waited on for long: waiting while the
+            // lock is held would block every other download and playback start.
+            withTimeoutOrNull(CacheReclaimTimeoutMs) { runCatching { reclaimDiskCache(activeEngine) } }
+        }
+        // While other streams are active the engine enforces the cache limit by itself once it
+        // is idle again.
         runCatching { updateCacheState(readAggregateStats(activeEngine)) }
-        if (downloadStreams.isEmpty() && currentStream == null) closeEngine()
+        if (engineIdle) closeEngine()
     }
 
     actual suspend fun clearCache(): P2pCacheClearResult = lifecycleMutex.withLock {

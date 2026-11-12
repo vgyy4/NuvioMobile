@@ -30,10 +30,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "P2pStreamingEngine"
 private const val DIAGNOSTIC_TAG = "NuvioP2PDiag"
 private const val DIAGNOSTIC_SAMPLE_INTERVAL_MS = 1_000L
+private const val CACHE_RECLAIM_TIMEOUT_MS = 15_000L
 
 internal fun buildNuvioEngineConfig(
     stateDirectory: File,
@@ -194,12 +196,17 @@ actual object P2pStreamingEngine {
         withContext(NonCancellable + Dispatchers.IO) {
             val owner = downloadStreams.remove(stream.id) ?: return@withContext
             stopPreparedStream(owner, stream.id)
-            // Streams still in use (playback or other downloads) are protected and stay.
-            runCatching { owner.reclaimDiskCache(0L) }
+            val engineIdle = downloadStreams.isEmpty() && currentStreamId == null
+            if (engineIdle) {
+                // `reclaimDiskCache` suspends until the engine has done it, and the engine only
+                // reclaims while nothing is being read. It is therefore requested only when
+                // nothing else is active, and bounded, so a download slot is never held up.
+                withTimeoutOrNull(CACHE_RECLAIM_TIMEOUT_MS) { runCatching { owner.reclaimDiskCache(0L) } }
+            }
+            // While other streams are active the engine enforces the cache limit by itself once
+            // it is idle again.
             startMutex.withLock {
                 if (downloadStreams.isEmpty() && currentStreamId == null && engine === owner) {
-                    // Give the reclaim a moment to finish before the engine goes away.
-                    delay(DIAGNOSTIC_SAMPLE_INTERVAL_MS + 100L)
                     closeEngine(owner)
                 }
             }
