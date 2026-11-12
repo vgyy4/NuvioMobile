@@ -65,8 +65,11 @@ fun DownloadsScreen(
     var downloadPendingDeletionId by rememberSaveable { mutableStateOf<String?>(null) }
     val openDownloadsDirectoryFailedText = stringResource(Res.string.downloads_open_directory_failed)
 
-    val completedEpisodes = remember(uiState.items) {
-        uiState.completedItems
+    // Progress ticks replace `uiState.items` several times a second; sorting only depends on the
+    // completed downloads, which do not change while others are still downloading.
+    val completedItems = uiState.completedItems
+    val completedEpisodes = remember(completedItems) {
+        completedItems
             .filter { it.isEpisode }
             .sortedForSeriesDownloads()
     }
