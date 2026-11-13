@@ -310,8 +310,37 @@ object DownloadsRepository {
         stream: StreamItem,
         downloadSubtitles: Boolean = true,
         subtitleLanguages: List<String> = emptyList(),
+        sharing: DownloadSharingMode = DownloadSharingMode.IfSameSource,
     ): DownloadEnqueueResult {
         ensureLoaded()
+
+        // Another profile may already have this video: share its file instead of downloading again.
+        if (sharing != DownloadSharingMode.Never) {
+            val candidate = findOtherProfileDownload(
+                parentMetaId = parentMetaId,
+                seasonNumber = seasonNumber,
+                episodeNumber = episodeNumber,
+                stream = stream,
+            )
+            if (candidate != null && (sharing == DownloadSharingMode.Always || candidate.isSameSource)) {
+                val shared = shareOtherProfileDownload(
+                    candidate = candidate,
+                    contentType = contentType,
+                    videoId = videoId,
+                    parentMetaId = parentMetaId,
+                    parentMetaType = parentMetaType,
+                    title = title,
+                    logo = logo,
+                    poster = poster,
+                    background = background,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    episodeTitle = episodeTitle,
+                    episodeThumbnail = episodeThumbnail,
+                )
+                if (shared != null) return shared
+            }
+        }
 
         val directUrl = stream.playableDirectUrl
             ?.trim()
@@ -434,6 +463,153 @@ object DownloadsRepository {
         } else {
             DownloadEnqueueResult.Started
         }
+    }
+
+    /**
+     * The download of the same content that ANOTHER profile made and that can be shared, or null.
+     * Read-only: it only looks at the saved lists of the other profiles. [stream] is the source the
+     * user picked (null when the source does not matter, e.g. for the episodes of a season).
+     */
+    internal fun findOtherProfileDownload(
+        parentMetaId: String,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        stream: StreamItem?,
+    ): OtherProfileDownload? {
+        ensureLoaded()
+        return chooseOtherProfileDownload(
+            logicalContentKey = buildLogicalKey(parentMetaId, seasonNumber, episodeNumber),
+            stream = stream,
+            entries = otherProfileDownloads(),
+            fileExists = { it.hasPlayableLocalFile() },
+            allowInProgress = false,
+        )
+    }
+
+    /**
+     * Gives the active profile a record for the episode of another profile's download, whatever its
+     * source is (used for the episodes of a season). True if something was shared.
+     */
+    internal fun shareFromOtherProfile(
+        contentType: String,
+        videoId: String,
+        parentMetaId: String,
+        parentMetaType: String,
+        title: String,
+        logo: String?,
+        poster: String?,
+        background: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeTitle: String?,
+        episodeThumbnail: String?,
+    ): Boolean {
+        ensureLoaded()
+        val candidate = findOtherProfileDownload(
+            parentMetaId = parentMetaId,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            stream = null,
+        ) ?: return false
+        return shareOtherProfileDownload(
+            candidate = candidate,
+            contentType = contentType,
+            videoId = videoId,
+            parentMetaId = parentMetaId,
+            parentMetaType = parentMetaType,
+            title = title,
+            logo = logo,
+            poster = poster,
+            background = background,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            episodeTitle = episodeTitle,
+            episodeThumbnail = episodeThumbnail,
+        ) != null
+    }
+
+    /** The saved downloads of every profile except the active one, with the id of their profile. */
+    private fun otherProfileDownloads(): List<Pair<Int, DownloadItem>> {
+        val activeProfileId = ProfileRepository.activeProfileId
+        return profileIdsToScan()
+            .filter { it != activeProfileId }
+            .flatMap { profileId ->
+                val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
+                if (payload.isEmpty()) {
+                    emptyList()
+                } else {
+                    DownloadsCodec.decodeItemsOrNull(payload).orEmpty().map { profileId to it }
+                }
+            }
+    }
+
+    /**
+     * Adds a record for the active profile that points to the same file as [candidate] (a finished
+     * download of another profile): nothing is transferred and no extra disk space is used. The
+     * record keeps the source details, subtitle choice and file of the original, and gets this
+     * profile's own id and content details. The subtitles and skip times saved next to the file are
+     * found by the file's location, so they are shared too (only what the original saved exists).
+     * An earlier record of this profile for the same content is replaced. Returns null, changing
+     * nothing, when the candidate's file is gone.
+     */
+    private fun shareOtherProfileDownload(
+        candidate: OtherProfileDownload,
+        contentType: String,
+        videoId: String,
+        parentMetaId: String,
+        parentMetaType: String,
+        title: String,
+        logo: String?,
+        poster: String?,
+        background: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeTitle: String?,
+        episodeThumbnail: String?,
+    ): DownloadEnqueueResult? {
+        val source = candidate.item
+        if (!candidate.isComplete) return null
+        val fileUri = DownloadsPlatformDownloader.resolveLocalFileUri(
+            localFileUri = source.localFileUri,
+            destinationFileName = source.fileName,
+        ) ?: return null
+
+        val now = DownloadsClock.nowEpochMs()
+        val logicalKey = buildLogicalKey(parentMetaId, seasonNumber, episodeNumber)
+        val currentItems = _uiState.value.items.toMutableList()
+        val existing = currentItems.firstOrNull { it.logicalContentKey == logicalKey }
+        if (existing != null) {
+            activeHandles.remove(existing.id)?.cancel()
+            deleteFilesUnlessShared(existing)
+            currentItems.removeAll { it.id == existing.id }
+        }
+
+        val linked = source.copy(
+            id = nextDownloadId(now),
+            contentType = contentType,
+            parentMetaId = parentMetaId,
+            parentMetaType = parentMetaType,
+            videoId = videoId,
+            title = title,
+            logo = logo,
+            poster = poster,
+            background = background,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            episodeTitle = episodeTitle,
+            episodeThumbnail = episodeThumbnail,
+            localFileUri = fileUri,
+            status = DownloadStatus.Completed,
+            errorMessage = null,
+            createdAtEpochMs = now,
+            updatedAtEpochMs = now,
+            sharedFromDownloadId = null,
+            sharedFromProfileId = null,
+        )
+        currentItems.add(0, linked)
+        publish(currentItems)
+        persist()
+        return DownloadEnqueueResult.SharedExisting
     }
 
     fun pauseDownload(downloadId: String) {

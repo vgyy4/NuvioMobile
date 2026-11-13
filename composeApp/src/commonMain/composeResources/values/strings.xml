@@ -1715,6 +1715,8 @@
     <string name="season_download_prompt_all">All %1$d episodes</string>
     <string name="season_download_prompt_unwatched">Unwatched only (%1$d)</string>
     <string name="season_download_summary">Season download: %1$d started, %2$d without a matching source, %3$d already downloaded</string>
+    <string name="season_download_shared_one">1 episode was already downloaded in another profile and shared</string>
+    <string name="season_download_shared_many">%1$d episodes were already downloaded in another profile and shared</string>
     <string name="download_options_title">Download options</string>
     <string name="download_options_subtitles">Subtitles</string>
     <string name="download_options_subtitles_hint">Choose which languages to download with the video</string>
@@ -1962,6 +1964,7 @@
     <string name="details_episode_badge_file">FILE</string>
     <string name="downloads_enqueue_missing_url">No direct stream link available</string>
     <string name="downloads_enqueue_replaced">Replaced previous download</string>
+    <string name="downloads_enqueue_shared">Already downloaded in another profile, shared</string>
     <string name="downloads_enqueue_started">Download started</string>
     <string name="downloads_enqueue_unsupported_format">Unsupported stream format for downloads</string>
     <string name="downloads_enqueue_p2p_unsupported">Torrent downloads are not available on this device yet</string>

@@ -40,7 +40,7 @@ internal data class SeasonDownloadBatch(
  * takes the release that matches the one picked for the first episode: the same "binge group" (the
  * add-on's own marker for "same release, next episode"), otherwise the same add-on at the same
  * resolution. Episodes without a matching source are skipped and counted in the summary, never
- * downloaded from some other release unasked. Episodes that already have a download are left alone.
+ * downloaded from some other release unasked. Episodes that already have a download are left alone, and episodes another profile already downloaded are shared with it (whatever source it used).
  */
 internal object SeasonDownloadCoordinator {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -58,12 +58,14 @@ internal object SeasonDownloadCoordinator {
                 var started = 0
                 var noSource = 0
                 var alreadyDownloaded = 0
+                var sharedFromOtherProfile = 0
                 for (episode in batch.episodes) {
                     try {
                         when (downloadEpisode(batch, episode)) {
                             EpisodeOutcome.Started -> started += 1
                             EpisodeOutcome.NoSource -> noSource += 1
                             EpisodeOutcome.AlreadyDownloaded -> alreadyDownloaded += 1
+                            EpisodeOutcome.SharedFromOtherProfile -> sharedFromOtherProfile += 1
                             EpisodeOutcome.Failed -> noSource += 1
                         }
                     } catch (cancelled: CancellationException) {
@@ -73,14 +75,25 @@ internal object SeasonDownloadCoordinator {
                     }
                 }
                 PlayerStreamsRepository.clearEpisodeStreams()
+                val summary = getString(Res.string.season_download_summary, started, noSource, alreadyDownloaded)
+                val sharedMessage = when (sharedFromOtherProfile) {
+                    0 -> null
+                    1 -> getString(Res.string.season_download_shared_one)
+                    else -> getString(Res.string.season_download_shared_many, sharedFromOtherProfile)
+                }
+                // One toast: the usual summary, plus how many episodes came from another profile.
                 NuvioToastController.show(
-                    getString(Res.string.season_download_summary, started, noSource, alreadyDownloaded),
+                    when {
+                        sharedMessage == null -> summary
+                        started + noSource + alreadyDownloaded == 0 -> sharedMessage
+                        else -> summary + "\n" + sharedMessage
+                    },
                 )
             }
         }
     }
 
-    private enum class EpisodeOutcome { Started, NoSource, AlreadyDownloaded, Failed }
+    private enum class EpisodeOutcome { Started, NoSource, AlreadyDownloaded, SharedFromOtherProfile, Failed }
 
     private suspend fun downloadEpisode(batch: SeasonDownloadBatch, episode: SeasonBatchEpisode): EpisodeOutcome {
         DownloadsRepository.ensureLoaded()
@@ -88,6 +101,23 @@ internal object SeasonDownloadCoordinator {
         if (DownloadsRepository.uiState.value.items.any { it.logicalContentKey == logicalKey }) {
             return EpisodeOutcome.AlreadyDownloaded
         }
+
+        // Another profile already downloaded this episode: use its file, whatever its source is.
+        val shared = DownloadsRepository.shareFromOtherProfile(
+            contentType = batch.contentType,
+            videoId = episode.videoId,
+            parentMetaId = batch.parentMetaId,
+            parentMetaType = batch.parentMetaType,
+            title = batch.title,
+            logo = batch.logo,
+            poster = batch.poster,
+            background = batch.background,
+            seasonNumber = episode.season,
+            episodeNumber = episode.episode,
+            episodeTitle = episode.title,
+            episodeThumbnail = episode.thumbnail,
+        )
+        if (shared) return EpisodeOutcome.SharedFromOtherProfile
 
         val candidates = lookUpSources(batch, episode)
         val chosen = chooseMatchingSource(batch.template, candidates) ?: return EpisodeOutcome.NoSource
@@ -124,7 +154,11 @@ internal object SeasonDownloadCoordinator {
             downloadSubtitles = batch.downloadSubtitles,
             subtitleLanguages = batch.subtitleLanguages,
         )
-        return if (result == DownloadEnqueueResult.Started) EpisodeOutcome.Started else EpisodeOutcome.Failed
+        return when (result) {
+            DownloadEnqueueResult.Started -> EpisodeOutcome.Started
+            DownloadEnqueueResult.SharedExisting -> EpisodeOutcome.SharedFromOtherProfile
+            else -> EpisodeOutcome.Failed
+        }
     }
 
     private suspend fun lookUpSources(batch: SeasonDownloadBatch, episode: SeasonBatchEpisode): List<StreamItem> {

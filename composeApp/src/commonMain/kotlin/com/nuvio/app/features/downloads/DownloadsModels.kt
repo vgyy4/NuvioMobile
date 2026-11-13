@@ -8,6 +8,7 @@ import nuvio.composeapp.generated.resources.downloads_enqueue_missing_url
 import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_disabled
 import nuvio.composeapp.generated.resources.downloads_enqueue_p2p_unsupported
 import nuvio.composeapp.generated.resources.downloads_enqueue_replaced
+import nuvio.composeapp.generated.resources.downloads_enqueue_shared
 import nuvio.composeapp.generated.resources.downloads_enqueue_started
 import nuvio.composeapp.generated.resources.downloads_enqueue_unsupported_format
 import org.jetbrains.compose.resources.getString
@@ -61,7 +62,14 @@ data class DownloadItem(
     val errorMessage: String? = null,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
+    // Set while this record only follows a running download of another profile (same file name):
+    // that download's id and its profile. Such a record never transfers anything itself.
+    val sharedFromDownloadId: String? = null,
+    val sharedFromProfileId: Int? = null,
 ) {
+    val isFollower: Boolean
+        get() = sharedFromDownloadId != null
+
     val isEpisode: Boolean
         get() = seasonNumber != null && episodeNumber != null
 
@@ -103,6 +111,7 @@ data class DownloadsUiState(
 enum class DownloadEnqueueResult {
     Started,
     Replaced,
+    SharedExisting,
     MissingUrl,
     UnsupportedFormat,
     P2pUnsupported,
@@ -111,6 +120,7 @@ enum class DownloadEnqueueResult {
     suspend fun toastMessage(): String = when (this) {
         Started -> getString(Res.string.downloads_enqueue_started)
         Replaced -> getString(Res.string.downloads_enqueue_replaced)
+        SharedExisting -> getString(Res.string.downloads_enqueue_shared)
         MissingUrl -> getString(Res.string.downloads_enqueue_missing_url)
         UnsupportedFormat -> getString(Res.string.downloads_enqueue_unsupported_format)
         P2pUnsupported -> getString(Res.string.downloads_enqueue_p2p_unsupported)
