@@ -201,7 +201,9 @@ internal fun DownloadsFinishedShelf(
                     HomePosterCard(
                         item = preview,
                         detailLine = episodeLine,
-                        isWatched = true,
+                        // Everything here is watched, so the card's own check badge (top right) would only
+                        // sit under the trash button.
+                        isWatched = false,
                         onClick = { onClick(entry) },
                         onLongClick = { onLongClick(entry) },
                     )
