@@ -32,7 +32,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.downloads_p2p_not_enough_space
 import okhttp3.ConnectionPool
+import org.jetbrains.compose.resources.getString
+import com.nuvio.app.features.p2p.formatP2pMegabytes
 
 internal class AndroidDownloadScheduler(val context: Context) {
     val store = AndroidDownloadStore(File(context.filesDir, "download-transfers"))
@@ -130,6 +134,23 @@ internal class AndroidDownloadScheduler(val context: Context) {
         }
     }
 
+    fun removeOrphanedPartialFiles(knownFileNames: Set<String>) {
+        cleanupScope.launch {
+            val now = System.currentTimeMillis()
+            // Partial files and subtitle folders that belong to no download (e.g. after a crash).
+            directory.listFiles().orEmpty()
+                .filter { (it.isFile && it.name.endsWith(".part")) || (it.isDirectory && it.name.endsWith(".subtitles")) }
+                .forEach { file ->
+                    val fileName = file.name.removeSuffix(".part").removeSuffix(".subtitles")
+                    if (fileName in knownFileNames || store.get(fileName) != null) return@forEach
+                    if (now - file.lastModified() < ORPHAN_MIN_AGE_MS) return@forEach
+                    lock(fileName).withLock {
+                        if (store.get(fileName) == null) file.deleteRecursively()
+                    }
+                }
+        }
+    }
+
     private fun cancelScheduled(transfer: AndroidDownloadTransfer) {
         if (Build.VERSION.SDK_INT >= 34) jobScheduler().cancel(transfer.jobId)
         else WorkManager.getInstance(context).cancelUniqueWork(workName(transfer))
@@ -155,24 +176,49 @@ internal class AndroidDownloadScheduler(val context: Context) {
             currentCoroutineContext().ensureActive()
             if (!isActive(transfer)) return@withLock false
             var lastProgressAt = 0L
-            val partial = if (destination.isFile) destination else transferAndroidDownload(
-                item = transfer.item,
-                directory = directory,
-                validator = transfer.validator,
-                client = client,
-                onHeaders = { total, validator ->
-                    updateActive(transfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
-                },
-                onProgress = { bytes, total ->
-                    val now = SystemClock.elapsedRealtime()
-                    if (now - lastProgressAt >= 1_000L || bytes == total) {
-                        lastProgressAt = now
-                        updateActive(transfer) {
-                            it.copy(item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
-                        }?.let(onProgress)
-                    }
-                },
-            )
+            val partial = if (destination.isFile) destination else {
+                // A torrent is streamed by the P2P engine on a local URL, then downloaded like any
+                // other file. `close()` always runs so the engine and its cache are released.
+                val torrent = if (transfer.item.isP2p) AndroidTorrentStream.open(context, transfer.item) else null
+                try {
+                    transferAndroidDownload(
+                        item = torrent?.let { transfer.item.copy(sourceUrl = it.localUrl, sourceHeaders = emptyMap()) }
+                            ?: transfer.item,
+                        directory = directory,
+                        validator = transfer.validator,
+                        client = client,
+                        onHeaders = { total, validator ->
+                            if (torrent != null && total != null) {
+                                // While the stream is open the engine caches the file as well, so
+                                // twice the remaining size must fit, on top of what other running
+                                // torrent downloads still have to write.
+                                val shortfall = TorrentDiskBudget.reserve(
+                                    downloadId = transfer.item.id,
+                                    totalBytes = total,
+                                    downloadedBytes = File(directory, "$fileName.part").length(),
+                                    freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
+                                )
+                                if (shortfall != null) throw NotEnoughSpaceException(shortfall.neededBytes, shortfall.freeBytes)
+                            }
+                            updateActive(transfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
+                        },
+                        onProgress = { bytes, total ->
+                            val now = SystemClock.elapsedRealtime()
+                            if (torrent != null && total != null) {
+                                TorrentDiskBudget.update(transfer.item.id, total, bytes)
+                            }
+                            if (now - lastProgressAt >= 1_000L || bytes == total) {
+                                lastProgressAt = now
+                                updateActive(transfer) {
+                                    it.copy(item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
+                                }?.let(onProgress)
+                            }
+                        },
+                    )
+                } finally {
+                    torrent?.close()
+                }
+            }
             currentCoroutineContext().ensureActive()
             updateActive(transfer) { current ->
                 if (partial != destination && !partial.renameTo(destination)) {
@@ -194,8 +240,24 @@ internal class AndroidDownloadScheduler(val context: Context) {
             currentCoroutineContext().ensureActive()
             if (!isActive(transfer)) return@withLock false
             val retry = shouldRetryAndroidDownload(error, transfer.retryCount)
-            if (retry) updateActive(transfer) { it.copy(retryCount = it.retryCount + 1) }
-            else fail(transfer, error)
+            if (retry) {
+                updateActive(transfer) { it.copy(retryCount = it.retryCount + 1) }
+            } else {
+                fail(
+                    transfer,
+                    if (error is NotEnoughSpaceException) {
+                        Exception(
+                            getString(
+                                Res.string.downloads_p2p_not_enough_space,
+                                formatP2pMegabytes(error.neededBytes),
+                                formatP2pMegabytes(error.freeBytes),
+                            ),
+                        )
+                    } else {
+                        error
+                    },
+                )
+            }
             retry
         } finally {
             if (network != null) withContext(NonCancellable + Dispatchers.IO) { client.connectionPool.evictAll() }
@@ -232,6 +294,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
         const val FILE_NAME = "download_file_name"
         const val GENERATION = "download_generation"
         const val JOB_NAMESPACE = "nuvio-downloads"
+        private const val ORPHAN_MIN_AGE_MS = 2L * 60L * 1_000L
     }
 }
 

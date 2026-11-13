@@ -30,4 +30,10 @@ internal expect object DownloadsPlatformDownloader {
     fun resolveLocalFileUri(localFileUri: String?, destinationFileName: String): String?
 
     fun openDownloadsDirectory(): Boolean
+
+    /**
+     * Deletes partial downloads (`*.part`) that belong to no download in [knownFileNames] and have
+     * not been touched for a while, e.g. what a crash or a forced quit left behind.
+     */
+    fun removeOrphanedPartialFiles(knownFileNames: Set<String>)
 }

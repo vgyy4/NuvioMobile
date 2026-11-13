@@ -46,7 +46,7 @@ internal fun PlayerScreenRuntime.playReplacementSource(stream: StreamItem, url: 
     activeProviderName = stream.addonName
     activeProviderAddonId = stream.addonId
     activeStream = stream
-    currentStreamBingeGroup = stream.behaviorHints.bingeGroup
+    currentStreamBingeGroup = stream.effectiveBingeGroup
     activeSubtitleExtras = SubtitleRequestExtras.from(stream.behaviorHints, url)
     currentStreamFilename = stream.behaviorHints.filename
     currentStreamInfoHash = stream.infoHash

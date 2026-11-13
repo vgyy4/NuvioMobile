@@ -75,6 +75,10 @@ internal actual object DownloadsPlatformDownloader {
         return runCatching { file.delete() }.getOrDefault(false)
     }
 
+    actual fun removeOrphanedPartialFiles(knownFileNames: Set<String>) {
+        downloadScheduler?.removeOrphanedPartialFiles(knownFileNames)
+    }
+
     actual fun removePartialFile(destinationFileName: String): Boolean {
         val scheduler = downloadScheduler ?: return false
         scheduler.remove(destinationFileName)

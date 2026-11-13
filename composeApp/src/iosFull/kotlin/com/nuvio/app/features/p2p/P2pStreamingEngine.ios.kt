@@ -65,14 +65,25 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSLog
+import platform.Foundation.NSProcessInfo
 
 private const val StatsPollIntervalMs = 250L
+private const val CacheReclaimTimeoutMs = 15_000L
 private const val StartupStatsPollIntervalMs = 1_000L
 private const val CacheStatsPollIntervalMs = 1_000L
-private const val MemoryCacheCapacityBytes = 64L * 1024L * 1024L
+// Devices with <= 2.5 GiB of RAM (iPad Air 2, iPhone 6s/7/8 ...) get a smaller in-memory
+// piece cache so the engine does not push the app towards a jetsam kill.
+private const val LowMemoryDeviceThresholdBytes = 2_684_354_560uL
+private val MemoryCacheCapacityBytes: Long =
+    if (NSProcessInfo.processInfo.physicalMemory <= LowMemoryDeviceThresholdBytes) {
+        24L * 1024L * 1024L
+    } else {
+        64L * 1024L * 1024L
+    }
 
 actual object P2pStreamingEngine {
     private data class EngineConfigurationKey(
@@ -129,6 +140,8 @@ actual object P2pStreamingEngine {
     private var engineConfigurationKey: EngineConfigurationKey? = null
     private var currentTorrentId: String? = null
     private var currentStream: NativeStream? = null
+    // Streams opened for downloads, by stream id. Guarded by lifecycleMutex.
+    private val downloadStreams = mutableMapOf<String, NativeStream>()
     private var statsJob: Job? = null
     private var cacheStatsJob: Job? = null
     private var generation = 0L
@@ -200,6 +213,56 @@ actual object P2pStreamingEngine {
         }
     }
 
+    actual suspend fun openDownloadStream(request: P2pStreamRequest): P2pDownloadStream =
+        lifecycleMutex.withLock {
+            var preparedStream: NativeStream? = null
+            try {
+                val magnet = buildP2pMagnetUri(
+                    request.infoHash,
+                    (DefaultTrackers + request.trackers).distinct(),
+                )
+                val activeEngine = ensureEngine()
+                val canonicalHash = canonicalP2pInfoHash(request.infoHash)
+                val torrentId = if (canonicalHash in knownTorrentIds) {
+                    canonicalHash
+                } else {
+                    addMagnet(activeEngine, magnet).also(knownTorrentIds::add)
+                }
+                currentCoroutineContext().ensureActive()
+                val stream = prepareStream(activeEngine, torrentId, request.fileIdx, request.filename, bulk = true)
+                preparedStream = stream
+                currentCoroutineContext().ensureActive()
+                downloadStreams[stream.id] = stream
+                log("download stream ready fileIndex=${stream.fileIndex} fileBytes=${stream.fileSize}")
+                P2pDownloadStream(id = stream.id, localUrl = stream.url)
+            } catch (cancellation: CancellationException) {
+                withContext(NonCancellable) {
+                    preparedStream?.let { runCatching { stopNativeStream(engine, it.id) } }
+                }
+                throw cancellation
+            } catch (error: Throwable) {
+                preparedStream?.let { runCatching { stopNativeStream(engine, it.id) } }
+                throw P2pStreamingException(error.message ?: "Unable to start torrent download")
+            }
+        }
+
+    actual suspend fun closeDownloadStream(stream: P2pDownloadStream): Unit = lifecycleMutex.withLock {
+        val native = downloadStreams.remove(stream.id) ?: return@withLock
+        val activeEngine = engine ?: return@withLock
+        runCatching { stopNativeStream(activeEngine, native.id) }
+        val engineIdle = downloadStreams.isEmpty() && currentStream == null
+        if (engineIdle) {
+            // The engine only reclaims cache while nothing is being read, so this is requested
+            // only when nothing else is active, and never waited on for long: waiting while the
+            // lock is held would block every other download and playback start.
+            withTimeoutOrNull(CacheReclaimTimeoutMs) { runCatching { reclaimDiskCache(activeEngine) } }
+        }
+        // While other streams are active the engine enforces the cache limit by itself once it
+        // is idle again.
+        runCatching { updateCacheState(readAggregateStats(activeEngine)) }
+        if (engineIdle) closeEngine()
+    }
+
     actual suspend fun clearCache(): P2pCacheClearResult = lifecycleMutex.withLock {
         check(_state.value !is P2pStreamingState.Connecting &&
             _state.value !is P2pStreamingState.Streaming) {
@@ -243,7 +306,8 @@ actual object P2pStreamingEngine {
         currentTorrentId = null
         _state.value = P2pStreamingState.Idle
         stream?.let { runCatching { stopNativeStream(engine, it.id) } }
-        if (shutdownEngine) closeEngine()
+        // Download streams keep the engine alive; it is closed when the last one closes.
+        if (shutdownEngine && downloadStreams.isEmpty()) closeEngine()
     }
 
     private fun startStartupStatsPolling(
@@ -324,7 +388,9 @@ actual object P2pStreamingEngine {
             torrentProfile = settings.torrentProfile,
             diskCacheCapacityBytes = settings.cacheSize.bytes,
         )
-        engine?.takeIf { engineConfigurationKey == configuration }?.let { return it }
+        // A changed setting must not tear the engine down under running downloads.
+        engine?.takeIf { engineConfigurationKey == configuration || downloadStreams.isNotEmpty() }
+            ?.let { return it }
         closeEngine()
 
         val stateDirectory = "${NSHomeDirectory()}/Library/Application Support/NuvioEngine/state"
@@ -407,6 +473,7 @@ actual object P2pStreamingEngine {
         torrentId: String,
         fileIndex: Int?,
         filename: String?,
+        bulk: Boolean = false,
     ): NativeStream {
         val requestId = memScoped {
             val request = alloc<nuvio_engine_stream_request>()
@@ -417,6 +484,9 @@ actual object P2pStreamingEngine {
             request.torrent_id = torrentId.cstr.getPointer(this)
             request.file_index = fileIndex?.toUInt() ?: UInt.MAX_VALUE
             request.filename_hint = filename?.cstr?.getPointer(this)
+            // Downloads save the bytes: only verified data, and no playback deadlines
+            // (NUVIO_ENGINE_STREAM_FLAG_BULK = 2; engines built before the flag ignore it).
+            request.flags = if (bulk) 2u else 0u
             val output = alloc<ULongVar>()
             checkStatus(nuvio_engine_prepare_stream(activeEngine, request.ptr, output.ptr))
             output.value

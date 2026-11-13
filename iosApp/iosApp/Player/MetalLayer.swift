@@ -80,6 +80,9 @@ class MetalLayer: CAMetalLayer {
         }
     }
 
+    // CAMetalLayer.wantsExtendedDynamicRangeContent was introduced in iOS 16. On iOS 15
+    // (e.g. iPad Air 2) the layer is always SDR, so the override is simply not installed.
+    @available(iOS 16.0, *)
     override var wantsExtendedDynamicRangeContent: Bool {
         get { return super.wantsExtendedDynamicRangeContent }
         set {

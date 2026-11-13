@@ -119,6 +119,7 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     }
 
     // Audio tracks
+    func getTrackRevision() -> Int32 { playerVC?.trackRevision ?? 0 }
     func getAudioTrackCount() -> Int32 { Int32(playerVC?.audioTracks.count ?? 0) }
     func getAudioTrackIndex(at: Int32) -> Int32 {
         guard let t = playerVC?.audioTracks, Int(at) < t.count else { return 0 }
@@ -250,7 +251,7 @@ struct PluginSubtitle {
 
 // MARK: - Track Info
 
-struct TrackInfo {
+struct TrackInfo: Equatable {
     let index: Int
     let id: Int
     let type: String
@@ -318,6 +319,9 @@ final class MPVPlayerViewController: UIViewController {
     // Cached track lists
     var audioTracks: [TrackInfo] = []
     var subtitleTracks: [TrackInfo] = []
+    /// Bumped whenever `audioTracks` or `subtitleTracks` change, so Kotlin can reuse the track
+    /// lists it already built instead of re-reading every track on each snapshot.
+    private(set) var trackRevision: Int32 = 0
 
     // State (polled from Kotlin every 250ms)
     var isPlayerLoading: Bool = true
@@ -365,7 +369,9 @@ final class MPVPlayerViewController: UIViewController {
         metalLayer.contentsScale = view.window?.screen.nativeScale ?? UIScreen.main.nativeScale
         metalLayer.framebufferOnly = true
         metalLayer.backgroundColor = UIColor.black.cgColor
-        metalLayer.wantsExtendedDynamicRangeContent = true
+        if #available(iOS 16.0, *) {
+            metalLayer.wantsExtendedDynamicRangeContent = true
+        }
         metalLayer.anchorPoint = CGPoint(x: 0, y: 0)
         metalLayer.position = .zero
         let pip = PlayerPictureInPictureController(owner: self, metalLayer: metalLayer)
@@ -526,6 +532,52 @@ final class MPVPlayerViewController: UIViewController {
         }
     }
 
+    // MARK: - Low-memory device profile
+
+    /// Devices with roughly 2 GB of RAM or less (iPad Air 2, iPad 5th gen, iPhone 6s/7/8 ...).
+    /// mpv's defaults (compute-shader HDR peak detection, polyphase scalers) are tuned for
+    /// desktops and risk jetsam kills or dropped frames on these devices.
+    static let isLowMemoryDevice: Bool =
+        ProcessInfo.processInfo.physicalMemory <= 2_684_354_560 // 2.5 GiB
+
+    /// Devices with roughly 3 GB of RAM (>2.5 GiB, <=3.5 GiB): iPhone XR/11/SE 2/3 ...
+    private static let isMediumMemoryDevice: Bool =
+        !isLowMemoryDevice && ProcessInfo.processInfo.physicalMemory <= 3_758_096_384 // 3.5 GiB
+
+    /// Bounds mpv's demuxer cache by RAM. mpv's defaults are 150 MiB forward + 150 MiB back, which
+    /// is far more than a streaming player needs and counts against the jetsam limit.
+    private func applyDemuxerCacheLimits() {
+        if Self.isLowMemoryDevice {
+            checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "48MiB"))
+            checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "16MiB"))
+            return
+        }
+        if Self.isMediumMemoryDevice {
+            checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "96MiB"))
+        }
+        // Larger devices keep mpv's default forward cache.
+        checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "32MiB"))
+    }
+
+    private func applyLowMemoryDeviceProfile() {
+        guard Self.isLowMemoryDevice else { return }
+        // Cheap scalers, no dithering / sigmoid / correct-downscaling passes.
+        checkError(mpv_set_option_string(mpv, "scale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "cscale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "dscale", "bilinear"))
+        checkError(mpv_set_option_string(mpv, "correct-downscaling", "no"))
+        checkError(mpv_set_option_string(mpv, "sigmoid-upscaling", "no"))
+        checkError(mpv_set_option_string(mpv, "dither-depth", "no"))
+        // Peak detection needs compute shaders and extra GPU memory; the panel is SDR anyway.
+        checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "no"))
+        // Lighter software decode path for codecs the A8-class hardware cannot decode (HEVC).
+        checkError(mpv_set_option_string(mpv, "vd-lavc-fast", "yes"))
+        checkError(mpv_set_option_string(mpv, "vd-lavc-skiploopfilter", "nonref"))
+        // Drop late frames instead of stalling audio.
+        checkError(mpv_set_option_string(mpv, "video-sync", "audio"))
+        checkError(mpv_set_option_string(mpv, "framedrop", "vo"))
+    }
+
     // MARK: - MPV Setup
 
     private func setupMpv() {
@@ -545,7 +597,10 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
         // iOS can invalidate the VideoToolbox session (e.g. Notification Center during PiP).
         // FFmpeg recreates it at the next frames; keep hardware decoding meanwhile.
-        checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "300"))
+        checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "60"))
+        // After a cache underrun keep buffering for 4 s before resuming (mpv's default is 1 s,
+        // which stutters again right away on a slow link).
+        checkError(mpv_set_option_string(mpv, "cache-pause-wait", "4"))
         checkError(mpv_set_option_string(mpv, "ao", Self.defaultAudioOutput))
         checkError(mpv_set_option_string(mpv, "audio-channels", "auto"))
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "yes"))
@@ -558,10 +613,13 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
         checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
         configureBundledSubtitleFont()
+        configureShaderCache()
         checkError(mpv_set_option_string(mpv, "keep-open", "yes"))
         checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "auto"))
         checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "yes"))
+        applyDemuxerCacheLimits()
+        applyLowMemoryDeviceProfile()
 
         checkError(mpv_initialize(mpv))
         applyAudioLanguagePreferences(preferredAudioLanguages)
@@ -600,6 +658,26 @@ final class MPVPlayerViewController: UIViewController {
         }
         checkError(mpv_set_option_string(mpv, "sub-font", "Noto Sans"))
         print("[MPV] Using bundled subtitle font: \(fontURL.lastPathComponent)")
+    }
+
+    /// Persist compiled GPU shaders and ICC profiles across launches (Android sets the same
+    /// directories) so the Vulkan pipeline does not recompile every shader on each playback.
+    private func configureShaderCache() {
+        guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let cacheURL = cachesURL.appendingPathComponent("mpv", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        } catch {
+            print("[MPV] Failed to create shader cache directory: \(error)")
+            return
+        }
+        checkError(mpv_set_option_string(mpv, "gpu-shader-cache", "yes"))
+        cacheURL.path.withCString { path in
+            checkError(mpv_set_option_string(mpv, "gpu-shader-cache-dir", path))
+            checkError(mpv_set_option_string(mpv, "icc-cache-dir", path))
+        }
     }
 
     private func setupNotifications() {
@@ -786,21 +864,44 @@ final class MPVPlayerViewController: UIViewController {
         saturation: Int,
         gamma: Int
     ) {
-        metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+        if #available(iOS 16.0, *) {
+            if metalLayer.wantsExtendedDynamicRangeContent != extendedDynamicRange {
+                metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
+            }
+        }
         guard mpv != nil else { return }
 
-        setStringProperty("hwdec", hardwareDecoder)
-        setStringProperty("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
-        setStringProperty("tone-mapping", toneMapping)
-        setStringProperty("hdr-compute-peak", hdrComputePeak ? "yes" : "no")
-        setStringProperty("target-prim", targetPrimaries)
-        setStringProperty("target-trc", targetTransfer)
-        setStringProperty("deband", deband ? "yes" : "no")
-        setStringProperty("interpolation", interpolation ? "yes" : "no")
-        setVideoEqualizer("brightness", brightness)
-        setVideoEqualizer("contrast", contrast)
-        setVideoEqualizer("saturation", saturation)
-        setVideoEqualizer("gamma", gamma)
+        setStringPropertyIfChanged("hwdec", hardwareDecoder)
+        setStringPropertyIfChanged("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
+        setStringPropertyIfChanged("tone-mapping", toneMapping)
+        let isLowMemory = Self.isLowMemoryDevice
+        setStringPropertyIfChanged("hdr-compute-peak", hdrComputePeak && !isLowMemory ? "yes" : "no")
+        setStringPropertyIfChanged("target-prim", targetPrimaries)
+        setStringPropertyIfChanged("target-trc", targetTransfer)
+        setStringPropertyIfChanged("deband", deband && !isLowMemory ? "yes" : "no")
+        setStringPropertyIfChanged("interpolation", interpolation && !isLowMemory ? "yes" : "no")
+        setVideoEqualizerIfChanged("brightness", brightness)
+        setVideoEqualizerIfChanged("contrast", contrast)
+        setVideoEqualizerIfChanged("saturation", saturation)
+        setVideoEqualizerIfChanged("gamma", gamma)
+    }
+
+    /// Last value written through `configureVideoOutput` / `configureAudioOutput`, per mpv
+    /// property. Re-setting an identical value still makes mpv reconfigure the decoder, audio
+    /// output or video pipeline, so identical writes are skipped.
+    private var appliedOutputValues: [String: String] = [:]
+
+    private func setStringPropertyIfChanged(_ name: String, _ value: String) {
+        guard mpv != nil, appliedOutputValues[name] != value else { return }
+        appliedOutputValues[name] = value
+        setStringProperty(name, value)
+    }
+
+    private func setVideoEqualizerIfChanged(_ name: String, _ value: Int) {
+        let clamped = String(max(-100, min(100, value)))
+        guard mpv != nil, appliedOutputValues[name] != clamped else { return }
+        appliedOutputValues[name] = clamped
+        setVideoEqualizer(name, value)
     }
 
     func configureAudioOutput(audioOutput: String) {
@@ -811,7 +912,7 @@ final class MPVPlayerViewController: UIViewController {
         } else {
             resolvedAudioOutput = audioOutput
         }
-        setStringProperty("ao", resolvedAudioOutput)
+        setStringPropertyIfChanged("ao", resolvedAudioOutput)
     }
 
     func setSpeed(_ speed: Float) {
@@ -1043,7 +1144,15 @@ final class MPVPlayerViewController: UIViewController {
         deactivateAudioSession()
         guard let ctx = mpv else { return }
         mpv = nil  // nil first so event loop stops reading
-        mpv_terminate_destroy(ctx)
+        // Every use of the handle on this object stops with the line above (all helpers guard on
+        // `mpv`). mpv_terminate_destroy blocks until the core and VO threads are down, so run it
+        // off the main thread. mpv still holds unretained pointers to this controller (wakeup
+        // callback context) and its metal layer (`wid`), so keep `self` alive until it returns
+        // and release it on the main thread (UIKit objects must not deinit elsewhere).
+        DispatchQueue.global(qos: .utility).async {
+            mpv_terminate_destroy(ctx)
+            DispatchQueue.main.async { withExtendedLifetime(self) {} }
+        }
     }
 
     private func activateAudioSessionForPlayback() {
@@ -1095,7 +1204,8 @@ final class MPVPlayerViewController: UIViewController {
         )
     }
 
-    /// Full state + track refresh — called from MPV event loop on property changes.
+    /// Full state + track refresh — called from the MPV event loop when the track list or the
+    /// selected audio/subtitle track changes, and when a file is loaded.
     func updateState() {
         refreshPlaybackState()
         refreshTracks()
@@ -1139,8 +1249,10 @@ final class MPVPlayerViewController: UIViewController {
                 subIdx += 1
             }
         }
+        let tracksChanged = audio != audioTracks || subs != subtitleTracks
         audioTracks = audio
         subtitleTracks = subs
+        if tracksChanged { trackRevision &+= 1 }
     }
 
     func updateNowPlayingMetadata(
@@ -1326,8 +1438,12 @@ final class MPVPlayerViewController: UIViewController {
                     let name = property?.pointee.name.map { String(cString: $0) }
                     if name == "sub-text" {
                         DispatchQueue.main.async { self.updateStyledSubtitle() }
-                    } else {
+                    } else if name == "track-list" || name == "aid" || name == "sid" {
                         DispatchQueue.main.async { self.updateState() }
+                    } else {
+                        // pause, core-idle, seeking, paused-for-cache, eof-reached: the track
+                        // list cannot have changed, so skip re-enumerating it.
+                        DispatchQueue.main.async { self.refreshPlaybackState() }
                     }
                 case MPV_EVENT_FILE_LOADED:
                     DispatchQueue.main.async {
@@ -1347,7 +1463,8 @@ final class MPVPlayerViewController: UIViewController {
                     }
                 case MPV_EVENT_PLAYBACK_RESTART:
                     DispatchQueue.main.async {
-                        self.updateState()
+                        self.refreshPlaybackState()
+                        self.updateStyledSubtitle()
                         self.publishNowPlayingForPlaybackSession()
                         self.syncNowPlayingPlaybackState(isPlaying: self.isPlayerPlaying, force: true)
                     }

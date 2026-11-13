@@ -59,6 +59,11 @@ object NetworkStatusRepository {
     private const val REQUEST_TIMEOUT_MS = 4_500L
     private const val FOREGROUND_REFRESH_DELAY_MS = 6_000L
     private const val FOREGROUND_FAILURE_CONFIRM_DELAY_MS = 2_000L
+    private const val NATIVE_FIRST_REPORT_TIMEOUT_MS = 5_000L
+    private const val OFFLINE_VERIFY_DELAY_MS = 2_500L
+    private const val FALLBACK_OFFLINE_BASE_DELAY_MS = 10_000L
+    private const val FALLBACK_OFFLINE_MAX_DELAY_MS = 60_000L
+    private const val FALLBACK_ONLINE_DELAY_MS = 90_000L
     private const val PUBLIC_PROBE_PRIMARY = "https://www.gstatic.com/generate_204"
     private const val PUBLIC_PROBE_FALLBACK = "https://cloudflare.com/cdn-cgi/trace"
 
@@ -75,7 +80,72 @@ object NetworkStatusRepository {
     fun ensureStarted() {
         if (started) return
         started = true
+        // The system tells us when the connection comes or goes, so normally nothing polls. If
+        // that listener cannot be set up, or never reports anything, a bounded fallback takes over.
+        val listening = runCatching { NetworkPathMonitor.start(::onNetworkPathChanged) }.getOrDefault(false)
+        if (listening) {
+            // A working system listener reports the current state right away. Silence means it is
+            // not working.
+            scope.launch {
+                delay(NATIVE_FIRST_REPORT_TIMEOUT_MS)
+                if (!nativeReportSeen) startFallbackChecks()
+            }
+        } else {
+            startFallbackChecks()
+        }
         requestRefresh(force = true)
+    }
+
+    @kotlin.concurrent.Volatile
+    private var nativeReportSeen = false
+    private var offlineVerifyJob: Job? = null
+    private var fallbackJob: Job? = null
+
+    private fun onNetworkPathChanged(connected: Boolean) {
+        nativeReportSeen = true
+        // The system listener works after all: no fallback needed.
+        fallbackJob?.cancel()
+        fallbackJob = null
+
+        if (!connected) {
+            // No network at all: nothing to probe, switch immediately.
+            _uiState.value = NetworkStatusUiState(condition = NetworkCondition.NoInternet)
+            // One confirming check shortly after, in case the report was wrong (for example a
+            // path that is "unsatisfied" while a VPN still works). It runs once, not repeatedly.
+            offlineVerifyJob?.cancel()
+            offlineVerifyJob = scope.launch {
+                delay(OFFLINE_VERIFY_DELAY_MS)
+                requestRefresh(force = true)
+            }
+        } else {
+            offlineVerifyJob?.cancel()
+            // A network is available again: confirm once that the internet is really reachable
+            // (a captive portal or a dead router would still count as a "path").
+            requestRefresh(force = true)
+        }
+    }
+
+    /**
+     * Only used when the system listener does not work. While offline it re-checks with growing
+     * pauses (10 s up to 60 s) until the connection is back; while online it checks every 90 s so
+     * a lost connection is still noticed. Foreground refreshes keep working as before.
+     */
+    private fun startFallbackChecks() {
+        if (fallbackJob?.isActive == true) return
+        fallbackJob = scope.launch {
+            var offlineChecks = 0
+            while (true) {
+                val offline = _uiState.value.isOfflineLike
+                val wait = if (offline) {
+                    (FALLBACK_OFFLINE_BASE_DELAY_MS shl minOf(offlineChecks, 3)).coerceAtMost(FALLBACK_OFFLINE_MAX_DELAY_MS)
+                } else {
+                    FALLBACK_ONLINE_DELAY_MS
+                }
+                offlineChecks = if (offline) offlineChecks + 1 else 0
+                delay(wait)
+                requestRefresh(force = true)
+            }
+        }
     }
 
     fun requestForegroundRefresh() {

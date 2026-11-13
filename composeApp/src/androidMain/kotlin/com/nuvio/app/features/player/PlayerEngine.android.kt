@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.text.SpannableString
@@ -59,6 +60,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ForwardingRenderer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -1014,7 +1016,14 @@ private fun ExoPlayerSurface(
                 }
 
                 override fun seekBy(offsetMs: Long) {
+                    // Relative skip taps may land on the nearest sync sample (faster, no preroll
+                    // decode). The seek parameters are read when the playback thread handles the
+                    // seek, and messages to it are ordered, so restoring EXACT right after posting
+                    // the seek keeps every other seek (absolute, resume, scrubbing, intro skip)
+                    // frame-accurate.
+                    exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                     exoPlayer.seekTo((exoPlayer.currentPosition + offsetMs).coerceAtLeast(0L))
+                    exoPlayer.setSeekParameters(SeekParameters.EXACT)
                 }
 
                 override fun retry() {
@@ -1457,7 +1466,7 @@ private fun LibmpvPlayerSurface(
                 if (property == "sub-text" || property == "sid") view.updateStyledSubtitle()
             }
             override fun eventProperty(property: String, value: Double) {
-                if (property == "duration" || property == "time-pos" || property == "speed") {
+                if (property == "duration" || property == "speed") {
                     dispatchSnapshot()
                 }
             }
@@ -1747,11 +1756,19 @@ private class NuvioLibmpvView(
         mpv.setOptionString("ytdl", "no").logIfMpvError("ytdl")
         mpv.setOptionString("tls-verify", "yes")
         mpv.setOptionString("tls-ca-file", "${context.filesDir.path}/cacert.pem")
-        mpv.setOptionString("demuxer-max-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-bytes")
-        mpv.setOptionString("demuxer-max-back-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-back-bytes")
+        val lowRamDevice = isLowRamLibmpvDevice(context)
+        mpv.setOptionString("demuxer-max-bytes", "${libmpvForwardCacheBytes(lowRamDevice)}").logIfMpvError("demuxer-max-bytes")
+        mpv.setOptionString("demuxer-max-back-bytes", "${libmpvBackCacheBytes(lowRamDevice)}").logIfMpvError("demuxer-max-back-bytes")
+        // After a cache underrun keep buffering for 4 s before resuming (mpv's default is 1 s).
+        mpv.setOptionString("cache-pause-wait", "4").logIfMpvError("cache-pause-wait")
         // Room above 100% for the player's amplification (+10 dB is about 316%).
         mpv.setOptionString("volume-max", "$LIBMPV_MAX_VOLUME_PERCENT").logIfMpvError("volume-max")
         mpv.setOptionString("vd-lavc-film-grain", "cpu")
+        if (lowRamDevice) {
+            // Lighter software decode path on low-RAM devices (mirrors the iOS low-memory profile).
+            mpv.setOptionString("vd-lavc-fast", "yes").logIfMpvError("vd-lavc-fast")
+            mpv.setOptionString("vd-lavc-skiploopfilter", "nonref").logIfMpvError("vd-lavc-skiploopfilter")
+        }
         mpv.setPropertyBoolean("keep-open", true)
         mpv.setPropertyBoolean("input-default-bindings", true)
         mpv.setPropertyBoolean("audio-fallback-to-null", true)
@@ -1766,8 +1783,6 @@ private class NuvioLibmpvView(
             "seeking" to MPV.mpvFormat.MPV_FORMAT_FLAG,
             "cache-buffering-state" to MPV.mpvFormat.MPV_FORMAT_INT64,
             "duration" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
-            "time-pos" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
-            "demuxer-cache-time" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
             "speed" to MPV.mpvFormat.MPV_FORMAT_DOUBLE,
             "track-list" to MPV.mpvFormat.MPV_FORMAT_NODE,
             "sid" to MPV.mpvFormat.MPV_FORMAT_INT64,
@@ -2232,8 +2247,21 @@ private data class LibmpvTrack(
 
 private const val LIBMPV_MAX_VOLUME_PERCENT = 400
 
-private fun libmpvCacheBytes(): Int =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 * 1024 * 1024 else 32 * 1024 * 1024
+private fun isLowRamLibmpvDevice(context: Context): Boolean {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        ?: return false
+    return activityManager.isLowRamDevice || activityManager.memoryClass <= 128
+}
+
+private fun libmpvForwardCacheBytes(lowRamDevice: Boolean): Int =
+    if (!lowRamDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+        64 * 1024 * 1024
+    } else {
+        32 * 1024 * 1024
+    }
+
+private fun libmpvBackCacheBytes(lowRamDevice: Boolean): Int =
+    if (lowRamDevice) 8 * 1024 * 1024 else 16 * 1024 * 1024
 
 private fun Int.logIfMpvError(option: String) {
     if (this < 0) Log.w(TAG, "libmpv option failed: $option status=$this")

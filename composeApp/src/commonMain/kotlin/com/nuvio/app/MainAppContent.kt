@@ -1,5 +1,9 @@
 package com.nuvio.app
 
+import com.nuvio.app.features.downloads.deleteDownloadLabel
+import com.nuvio.app.features.downloads.DeleteDownloadsRequest
+import com.nuvio.app.features.downloads.DeleteDownloadsKind
+import com.nuvio.app.features.downloads.DeleteDownloadsHost
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.MutableTransitionState
@@ -9,6 +13,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -21,6 +26,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -32,12 +38,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -51,6 +60,9 @@ import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
 import com.nuvio.app.core.ui.LocalPosterClickAnchor
+import com.nuvio.app.core.ui.LocalPosterOverlayWarmUp
+import com.nuvio.app.core.ui.PosterOverlayWarmUpGate
+import com.nuvio.app.core.ui.PosterOverlayWarmUpHost
 import com.nuvio.app.core.ui.LocalVerticalBarPadding
 import com.nuvio.app.navigation.PosterNavigationState
 import com.nuvio.app.navigation.posterNavigationEntry
@@ -182,11 +194,15 @@ import com.nuvio.app.features.watchprogress.continueWatchingItemKey
 import com.nuvio.app.features.watchprogress.nextUpDismissKey
 import com.nuvio.app.features.watchprogress.toContinueWatchingItem
 import com.nuvio.app.navigation.*
+import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import com.nuvio.app.features.servers.ServerRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
@@ -279,6 +295,27 @@ internal fun MainAppContent(
         var selectedPosterActionTarget by remember { mutableStateOf<PosterActionTarget?>(null) }
         var selectedPosterAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
         val posterOverlayHazeState = rememberHazeState()
+        // A card that is being held asks for the backdrop of the long-press overlay to be prepared
+        // before the long press fires (see LocalPosterOverlayWarmUp).
+        var posterOverlayWarm by remember { mutableStateOf(false) }
+        // One-off, invisible run of the overlay once the app is idle (see PosterOverlayWarmUp).
+        var posterOverlayWarmUpRunning by remember { mutableStateOf(false) }
+        val touchActivity = remember { IntArray(1) }
+        val currentRouteForWarmUp = rememberUpdatedState(currentRoute)
+        val posterOverlayWarmUp = remember {
+            { warm: Boolean ->
+                val route = currentRouteForWarmUp.value
+                // Details screens host their own overlay; only the shell's one is prepared here.
+                posterOverlayWarm = warm && (route is TabsRoute || route is CatalogRoute)
+            }
+        }
+        LaunchedEffect(posterOverlayWarm) {
+            if (posterOverlayWarm) {
+                // Safety net: never keep the extra backdrop recording around for long.
+                delay(4_000)
+                posterOverlayWarm = false
+            }
+        }
         var selectedContinueWatchingForActions by remember { mutableStateOf<ContinueWatchingItem?>(null) }
         var selectedContinueWatchingZoomAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
         val libraryDisintegrationRequests = remember { DisintegrationRequestController<String>() }
@@ -332,9 +369,20 @@ internal fun MainAppContent(
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
     val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
-    val downloadsUiState by remember {
+    // Only the completed downloads matter here. Collecting the full state would recompose this
+    // whole screen on every download progress tick.
+    val completedDownloadsFlow = remember {
         DownloadsRepository.ensureLoaded()
         DownloadsRepository.uiState
+            .map { it.completedItems }
+            .distinctUntilChanged()
+    }
+    val completedDownloads by completedDownloadsFlow.collectAsStateWithLifecycle(
+        initialValue = remember(completedDownloadsFlow) { DownloadsRepository.uiState.value.completedItems },
+    )
+    val offlineDownloadsEnabled by remember {
+        DownloadsRepository.ensureLoaded()
+        DownloadsRepository.offlineDownloadsHome
     }.collectAsStateWithLifecycle()
     val networkStatusUiState by remember {
         NetworkStatusRepository.uiState
@@ -496,6 +544,34 @@ internal fun MainAppContent(
     }
     launchOverlayState.targetState = launchOverlayVisible
 
+    LaunchedEffect(initialHomeReady) {
+        if (!initialHomeReady || PosterOverlayWarmUpGate.completed) return@LaunchedEffect
+        delay(3_000)
+        // Wait for a quiet moment: no touch for a while, on a tab, no overlay in use.
+        while (true) {
+            val activity = touchActivity[0]
+            delay(2_000)
+            val idle = touchActivity[0] == activity &&
+                currentRoute is TabsRoute &&
+                selectedPosterActionTarget == null &&
+                selectedContinueWatchingForActions == null &&
+                !posterOverlayWarm
+            if (idle) break
+        }
+        if (PosterOverlayWarmUpGate.completed) return@LaunchedEffect
+        PosterOverlayWarmUpGate.completed = true
+        posterOverlayWarmUpRunning = true
+    }
+    LaunchedEffect(Unit) {
+        // A real overlay (or a card about to open one) takes over: drop the warm-up. Read through a
+        // flow so the shell is not recomposed by it.
+        snapshotFlow {
+            selectedPosterActionTarget != null ||
+                selectedContinueWatchingForActions != null ||
+                posterOverlayWarm
+        }.collect { busy -> if (busy) posterOverlayWarmUpRunning = false }
+    }
+
     LaunchedEffect(
         rootContentReady,
         ownsAppRuntime,
@@ -617,7 +693,7 @@ internal fun MainAppContent(
         initialHomeReady,
         offlineLaunchRouteHandled,
         networkStatusUiState.condition,
-        downloadsUiState.completedItems,
+        completedDownloads,
     ) {
         if (!ownsAppRuntime) return@LaunchedEffect
         if (!initialHomeReady || offlineLaunchRouteHandled) return@LaunchedEffect
@@ -635,10 +711,10 @@ internal fun MainAppContent(
             NetworkCondition.ServersUnreachable,
             -> {
                 offlineLaunchRouteHandled = true
-                val hasPlayableDownload = downloadsUiState.completedItems.any {
+                val hasPlayableDownload = completedDownloads.any {
                     DownloadsRepository.playableLocalFileUri(it) != null
                 }
-                if (hasPlayableDownload) {
+                if (hasPlayableDownload && !offlineDownloadsEnabled) {
                     activateTab(AppScreenTab.Library)
                     navController.navigate(DownloadsRoute(downloadsTitle)) {
                         launchSingleTop = true
@@ -678,6 +754,7 @@ internal fun MainAppContent(
         }
     }
     var resumePromptItem by remember { mutableStateOf<ContinueWatchingItem?>(null) }
+    var deleteDownloadsRequest by remember { mutableStateOf<DeleteDownloadsRequest?>(null) }
     var lastExternalPlayerLaunch by remember { mutableStateOf<PlayerLaunch?>(null) }
     val activePlaybackProfileId = profileState.activeProfile?.profileIndex ?: ProfileRepository.activeProfileId
     val launchExternalPlayer = rememberExternalPlayerLauncher { result ->
@@ -705,8 +782,22 @@ internal fun MainAppContent(
         if (resumePromptItem != null) return@LaunchedEffect
         if (currentRoute is StreamRoute || currentRoute is PlayerRoute || currentRoute is PartyRoute) return@LaunchedEffect
         if (continueWatchingPreferencesUiState.showResumePromptOnLaunch) {
+            // Give the account's latest progress a moment to arrive, so the prompt shows where
+            // playback really stopped, also when it continued on another device.
+            kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                WatchProgressRepository.uiState.first { it.hasLoadedRemoteProgress }
+            }
             resumePromptItem = ResumePromptRepository.consumeResumePrompt()
         }
+    }
+
+    // While the prompt is showing, follow newer progress from sync instead of keeping stale data.
+    LaunchedEffect(resumePromptItem?.videoId) {
+        val videoId = resumePromptItem?.videoId ?: return@LaunchedEffect
+        WatchProgressRepository.uiState
+            .map { state -> state.entries.filter { it.videoId == videoId }.maxByOrNull { it.lastUpdatedEpochMs } }
+            .distinctUntilChanged()
+            .collect { resumePromptItem = resumePromptItem?.let(ResumePromptRepository::refresh) }
     }
 
     LaunchedEffect(currentRoute) {
@@ -949,6 +1040,7 @@ internal fun MainAppContent(
             resumeProgressFraction: Float?,
             manualSelection: Boolean,
             startFromBeginning: Boolean,
+            downloadOnly: Boolean = false,
         ) {
             val targetResumePositionMs = if (startFromBeginning) 0L else (resumePositionMs ?: 0L)
             val targetResumeProgressFraction = if (startFromBeginning) null else resumeProgressFraction
@@ -1021,8 +1113,9 @@ internal fun MainAppContent(
                     pauseDescription = pauseDescription,
                     resumePositionMs = if (startFromBeginning) 0L else resumePositionMs,
                     resumeProgressFraction = targetResumeProgressFraction,
-                    manualSelection = manualSelection,
+                    manualSelection = manualSelection || downloadOnly,
                     startFromBeginning = startFromBeginning,
+                    downloadOnly = downloadOnly,
                 ),
             )
             navController.navigate(
@@ -1099,6 +1192,60 @@ internal fun MainAppContent(
                     resumeProgressFraction = null,
                     manualSelection = true,
                     startFromBeginning = false,
+                )
+            }
+
+        val onDownloadSeason: SeasonDownloadAction =
+            { type, parentMetaId, parentMetaType, title, logo, poster, background, episodes ->
+                val first = episodes.firstOrNull()
+                if (first != null && PlaybackAvailability.current().canStream(type, first.videoId)) {
+                    val streamLaunchId = StreamLaunchStore.put(
+                        StreamLaunch(
+                            profileId = activePlaybackProfileId,
+                            type = type,
+                            videoId = first.videoId,
+                            parentMetaId = parentMetaId,
+                            parentMetaType = parentMetaType,
+                            title = title,
+                            logo = logo,
+                            poster = poster,
+                            background = background,
+                            seasonNumber = first.season,
+                            episodeNumber = first.episode,
+                            episodeTitle = first.title,
+                            episodeThumbnail = first.thumbnail,
+                            manualSelection = true,
+                            downloadOnly = true,
+                            seasonBatch = episodes.drop(1),
+                        ),
+                    )
+                    navController.navigate(StreamRoute(launchId = streamLaunchId, title = title))
+                } else {
+                    NuvioToastController.show(playbackUnavailableMessage)
+                }
+            }
+
+        val onDownloadSource: ContentPlayAction =
+            { type, videoId, parentMetaId, parentMetaType, title, logo, poster, background, seasonNumber, episodeNumber, episodeTitle, episodeThumbnail, pauseDescription, resumePositionMs ->
+                launchPlaybackWithDownloadPreference(
+                    type = type,
+                    videoId = videoId,
+                    parentMetaId = parentMetaId,
+                    parentMetaType = parentMetaType,
+                    title = title,
+                    logo = logo,
+                    poster = poster,
+                    background = background,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    episodeTitle = episodeTitle,
+                    episodeThumbnail = episodeThumbnail,
+                    pauseDescription = pauseDescription,
+                    resumePositionMs = resumePositionMs,
+                    resumeProgressFraction = null,
+                    manualSelection = true,
+                    startFromBeginning = false,
+                    downloadOnly = true,
                 )
             }
 
@@ -1257,6 +1404,29 @@ internal fun MainAppContent(
             openContinueWatching(item, true, false)
         }
 
+        val onContinueWatchingDownload: (ContinueWatchingItem) -> Unit = { item ->
+            launchPlaybackWithDownloadPreference(
+                type = item.parentMetaType,
+                videoId = item.videoId,
+                parentMetaId = item.parentMetaId,
+                parentMetaType = item.parentMetaType,
+                title = item.title,
+                logo = item.logo,
+                poster = item.poster,
+                background = item.background,
+                seasonNumber = item.seasonNumber,
+                episodeNumber = item.episodeNumber,
+                episodeTitle = item.episodeTitle,
+                episodeThumbnail = item.episodeThumbnail,
+                pauseDescription = item.pauseDescription,
+                resumePositionMs = null,
+                resumeProgressFraction = null,
+                manualSelection = true,
+                startFromBeginning = false,
+                downloadOnly = true,
+            )
+        }
+
         val onContinueWatchingRemove: (ContinueWatchingItem) -> Unit = { item ->
             continueWatchingDisintegrationRequests.arm(continueWatchingItemKey(item))
             if (item.isNextUp) {
@@ -1291,25 +1461,44 @@ internal fun MainAppContent(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .pointerInput(Unit) {
+                        // Only counts touches (never consumes them), to find a quiet moment.
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(PointerEventPass.Initial)
+                                touchActivity[0]++
+                            }
+                        }
+                    }
                     .background(MaterialTheme.nuvio.colors.background),
             ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null) {
-                            Modifier.hazeSource(state = posterOverlayHazeState)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .background(MaterialTheme.nuvio.colors.background),
+            // Below the content, which is opaque, so it is never seen.
+            PosterOverlayWarmUpHost(
+                running = {
+                    posterOverlayWarmUpRunning &&
+                        selectedPosterActionTarget == null &&
+                        selectedContinueWatchingForActions == null &&
+                        !posterOverlayWarm
+                },
+                hazeState = posterOverlayHazeState,
+                onFinished = { posterOverlayWarmUpRunning = false },
+            )
+            PosterOverlayHazeSourceBox(
+                active = {
+                    selectedPosterActionTarget != null ||
+                        selectedContinueWatchingZoomAnchor != null ||
+                        posterOverlayWarm ||
+                        posterOverlayWarmUpRunning
+                },
+                hazeState = posterOverlayHazeState,
+                modifier = Modifier.fillMaxSize(),
             ) {
             val verticalBarPadding = LocalVerticalBarPadding.current
             val drawsUnderVerticalBar = currentRoute.drawsUnderVerticalBar(selectedTab)
             SharedTransitionLayout {
                 CompositionLocalProvider(
                     LocalPosterClickAnchor provides if (posterNavigationEnabled) posterNavigation::prepare else null,
+                    LocalPosterOverlayWarmUp provides posterOverlayWarmUp,
                     LocalUseNativeNavigation provides useNativeNavigation,
                     LocalNativeNavigationBarHidden provides (currentRoute?.hidesNavigationBar == true),
                     LocalVerticalBarPadding provides if (drawsUnderVerticalBar) verticalBarPadding else PaddingValues(),
@@ -1358,8 +1547,12 @@ internal fun MainAppContent(
                             libraryDisintegrationRequests.current,
                             continueWatchingDisintegrationRequests.current,
                             requestedSettingsPageName,
+                            offlineDownloadsEnabled && networkStatusUiState.isOfflineLike && completedDownloads.isNotEmpty(),
                         ) {
                             AppTabState(
+                                offlineDownloadsHome = offlineDownloadsEnabled &&
+                                    networkStatusUiState.isOfflineLike &&
+                                    completedDownloads.isNotEmpty(),
                                 searchListState = searchListState,
                                 homeContentGeneration = appContentGeneration,
                                 profileId = profileState.activeProfile?.profileIndex,
@@ -1429,6 +1622,7 @@ internal fun MainAppContent(
                                     }
                                 },
                                 onDownloadsClick = { navController.navigate(DownloadsRoute(downloadsTitle)) },
+                                onOpenDownload = ::openDownloadedItem,
                                 onContinueWatchingClick = onContinueWatchingClick,
                                 onContinueWatchingLongPress = onContinueWatchingLongPress,
                                 onSwitchProfile = onSwitchProfile,
@@ -1523,6 +1717,8 @@ internal fun MainAppContent(
                         navController = navController,
                         onPlay = onPlay,
                         onPlayManually = onPlayManually,
+                        onDownloadSource = onDownloadSource,
+                        onDownloadSeason = onDownloadSeason,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = LocalNavAnimatedContentScope.current,
                     )
@@ -1716,6 +1912,7 @@ internal fun MainAppContent(
             }
             }
 
+            PosterOverlayHost {
             selectedPosterActionTarget?.let { posterActionTarget ->
                 key(posterActionTarget) {
                     val preview = posterActionTarget.preview
@@ -1738,7 +1935,7 @@ internal fun MainAppContent(
                             },
                         isWatched = isWatched,
                         anchor = selectedPosterAnchor,
-                        actions = listOf(
+                        actions = listOfNotNull(
                             PosterZoomOverlayAction(
                                 icon = if (isSaved) Icons.Default.DeleteOutline else Icons.Default.Add,
                                 label = if (isSaved) {
@@ -1869,6 +2066,57 @@ internal fun MainAppContent(
                                     }
                                 },
                             ),
+                            DownloadsRepository.findPlayableDownload(parentMetaId = preview.id)
+                                ?.takeIf { preview.type.equals("movie", ignoreCase = true) }
+                                ?.let { downloadedMovie ->
+                                    PosterZoomOverlayAction(
+                                        icon = Icons.Default.DeleteOutline,
+                                        label = deleteDownloadLabel(DeleteDownloadsKind.Movie),
+                                        isDestructive = true,
+                                        exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                        onSelected = {
+                                            deleteDownloadsRequest = DeleteDownloadsRequest(
+                                                DeleteDownloadsKind.Movie,
+                                                listOf(downloadedMovie.id),
+                                            )
+                                        },
+                                    )
+                                },
+                            if (
+                                preview.type.equals("movie", ignoreCase = true) &&
+                                !preview.id.startsWith("tmdb:") &&
+                                DownloadsRepository.findPlayableDownload(parentMetaId = preview.id) == null &&
+                                playbackAvailability.canStream(preview.type, preview.id)
+                            ) {
+                                PosterZoomOverlayAction(
+                                    icon = Icons.Rounded.Download,
+                                    label = stringResource(Res.string.download_action_label),
+                                    onSelected = {
+                                        launchPlaybackWithDownloadPreference(
+                                            type = preview.type,
+                                            videoId = preview.id,
+                                            parentMetaId = preview.id,
+                                            parentMetaType = preview.type,
+                                            title = preview.name,
+                                            logo = preview.logo,
+                                            poster = preview.poster,
+                                            background = preview.banner,
+                                            seasonNumber = null,
+                                            episodeNumber = null,
+                                            episodeTitle = null,
+                                            episodeThumbnail = null,
+                                            pauseDescription = null,
+                                            resumePositionMs = null,
+                                            resumeProgressFraction = null,
+                                            manualSelection = true,
+                                            startFromBeginning = false,
+                                            downloadOnly = true,
+                                        )
+                                    },
+                                )
+                            } else {
+                                null
+                            },
                         ),
                         hazeState = posterOverlayHazeState,
                         onDismissed = {
@@ -1919,6 +2167,54 @@ internal fun MainAppContent(
                                             icon = Icons.Default.PlayArrow,
                                             label = stringResource(Res.string.play_manually),
                                             onSelected = { onContinueWatchingPlayManually(item) },
+                                        ),
+                                    )
+                                }
+                                DownloadsRepository.findPlayableDownload(
+                                    parentMetaId = item.parentMetaId,
+                                    seasonNumber = item.seasonNumber,
+                                    episodeNumber = item.episodeNumber,
+                                    videoId = item.videoId,
+                                )?.let { downloaded ->
+                                    add(
+                                        PosterZoomOverlayAction(
+                                            icon = Icons.Default.DeleteOutline,
+                                            label = deleteDownloadLabel(
+                                                if (downloaded.isEpisode) {
+                                                    DeleteDownloadsKind.Episode
+                                                } else {
+                                                    DeleteDownloadsKind.Movie
+                                                },
+                                            ),
+                                            isDestructive = true,
+                                            exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                            onSelected = {
+                                                deleteDownloadsRequest = DeleteDownloadsRequest(
+                                                    if (downloaded.isEpisode) {
+                                                        DeleteDownloadsKind.Episode
+                                                    } else {
+                                                        DeleteDownloadsKind.Movie
+                                                    },
+                                                    listOf(downloaded.id),
+                                                )
+                                            },
+                                        ),
+                                    )
+                                }
+                                if (
+                                    canSelectContinueWatchingStreams(item) &&
+                                    DownloadsRepository.findPlayableDownload(
+                                        parentMetaId = item.parentMetaId,
+                                        seasonNumber = item.seasonNumber,
+                                        episodeNumber = item.episodeNumber,
+                                        videoId = item.videoId,
+                                    ) == null
+                                ) {
+                                    add(
+                                        PosterZoomOverlayAction(
+                                            icon = Icons.Rounded.Download,
+                                            label = stringResource(Res.string.download_action_label),
+                                            onSelected = { onContinueWatchingDownload(item) },
                                         ),
                                     )
                                 }
@@ -1988,6 +2284,7 @@ internal fun MainAppContent(
                     selectedContinueWatchingForActions?.let(onContinueWatchingRemove)
                 },
             )
+            }
 
             TrackingListPickerDialog(
                 visible = showLibraryListPicker,
@@ -2094,6 +2391,8 @@ internal fun MainAppContent(
                 }
             }
 
+            DeleteDownloadsHost(deleteDownloadsRequest) { deleteDownloadsRequest = null }
+
             NuvioFloatingPrompt(
                 visible = resumePromptItem != null,
                 imageUrl = resumePromptItem?.poster ?: resumePromptItem?.imageUrl,
@@ -2128,3 +2427,29 @@ private fun AppRoute?.drawsUnderVerticalBar(selectedTab: AppScreenTab): Boolean 
         is TabsRoute -> selectedTab == AppScreenTab.Home || selectedTab == AppScreenTab.Library
         else -> false
     }
+
+/**
+ * The content of the app, recorded as the blur source of the long-press overlay while that overlay
+ * (or a card about to open it) needs it. [active] is read here, not by the caller, so switching it
+ * does not recompose the whole app shell.
+ */
+@Composable
+private fun PosterOverlayHazeSourceBox(
+    active: () -> Boolean,
+    hazeState: HazeState,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .then(if (active()) Modifier.hazeSource(state = hazeState) else Modifier)
+            .background(MaterialTheme.nuvio.colors.background),
+        content = content,
+    )
+}
+
+/** Own recomposition scope for the long-press overlays, so opening one does not recompose the shell. */
+@Composable
+private fun PosterOverlayHost(content: @Composable () -> Unit) {
+    content()
+}

@@ -1,10 +1,12 @@
 package com.nuvio.app.features.player
 
+import com.nuvio.app.features.streams.effectiveBingeGroup
 import com.nuvio.app.core.i18n.localizedSeasonEpisodeCode
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.LocalFold
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.features.downloads.DownloadSkipTimes
 import com.nuvio.app.features.party.PartyRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.shuffle.EpisodeShuffleRepository
@@ -225,7 +227,9 @@ internal fun PlayerScreenRuntime.BindPlayerRuntimeEffects() {
         }
     }
 
-    LaunchedEffect(p2pStreamingState, activeTorrentInfoHash) {
+    // Keyed on the error message only: stats are published several times a second and must not
+    // restart this effect.
+    LaunchedEffect((p2pStreamingState as? P2pStreamingState.Error)?.message, activeTorrentInfoHash) {
         val state = p2pStreamingState
         if (activeTorrentInfoHash != null && state is P2pStreamingState.Error) {
             p2pResolvedSourceUrl = null
@@ -651,6 +655,12 @@ private fun PlayerScreenRuntime.BindPlayerMetadataAndSkipEffects() {
         val episode = activeEpisodeNumber
         val vid = activeVideoId
         if (!playerSettingsUiState.skipIntroEnabled) return@LaunchedEffect
+        // Downloaded content carries its own skip times, which also work without a connection.
+        DownloadSkipTimes.local(activeSourceUrl)?.takeIf { it.isNotEmpty() }?.let { saved ->
+            apiSkipIntervals = saved
+            recomputeMergedSkipIntervals()
+            return@LaunchedEffect
+        }
         if ((contentType ?: parentMetaType).equals("movie", ignoreCase = true)) {
             val api = SkipIntroRepository.getMovieSkipIntervals(parentMetaId, vid)
             apiSkipIntervals = api
@@ -1070,7 +1080,7 @@ internal fun findCredentialRefreshCandidate(
             }
             if (stream.streamLabel == expectedStreamTitle) score += 40
             if (!expectedFilename.isNullOrBlank() && stream.behaviorHints.filename == expectedFilename) score += 30
-            if (!expectedBingeGroup.isNullOrBlank() && stream.behaviorHints.bingeGroup == expectedBingeGroup) {
+            if (!expectedBingeGroup.isNullOrBlank() && stream.effectiveBingeGroup == expectedBingeGroup) {
                 score += 20
             }
             if (stream.playableDirectUrl?.hasLikelyExpiringPlaybackCredentials() == true) score += 5

@@ -1,5 +1,6 @@
 package com.nuvio.app.features.autosync
 
+import com.nuvio.app.core.ui.DevicePerformance
 import com.nuvio.app.features.player.SubtitleLanguageMatching
 import com.nuvio.app.features.addons.RawHttpResponse
 import com.nuvio.app.features.player.SubtitleSyncCue
@@ -23,7 +24,9 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.roundToLong
 
-internal val autoSyncCpuDispatcher = Dispatchers.Default.limitedParallelism(2)
+// One worker on low-end devices (few cores, little RAM), two elsewhere.
+internal val autoSyncCpuDispatcher =
+    Dispatchers.Default.limitedParallelism(if (DevicePerformance.isLowEnd) 1 else 2)
 
 /**
  * AutoSync V2, shared by every platform.

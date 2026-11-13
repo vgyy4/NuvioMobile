@@ -1,5 +1,12 @@
 package com.nuvio.app.features.details
 
+import com.nuvio.app.core.ui.PosterZoomOverlayExitAnimation
+import androidx.compose.material.icons.filled.DeleteOutline
+import com.nuvio.app.features.downloads.deleteDownloadLabel
+import com.nuvio.app.features.downloads.DownloadsRepository
+import com.nuvio.app.features.downloads.DeleteDownloadsRequest
+import com.nuvio.app.features.downloads.DeleteDownloadsKind
+import com.nuvio.app.features.downloads.DeleteDownloadsHost
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -32,6 +39,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material.icons.filled.Add
@@ -92,6 +100,10 @@ import com.nuvio.app.core.ui.NuvioCardDepthSurface
 import com.nuvio.app.core.ui.NuvioPosterZoomActionOverlay
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.PosterZoomAnchor
+import com.nuvio.app.core.ui.DialogButton
+import com.nuvio.app.core.ui.DialogButtonStyle
+import com.nuvio.app.core.ui.DialogButtons
+import com.nuvio.app.core.ui.DialogSurface
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
 import com.nuvio.app.core.ui.PosterZoomOverlayAction
 import com.nuvio.app.core.ui.ScreenActivityEffect
@@ -142,6 +154,7 @@ import com.nuvio.app.features.shuffle.rememberShuffleSave
 import com.nuvio.app.features.shuffle.shufflePrimaryAction
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.streams.rememberPlaybackAvailability
+import com.nuvio.app.features.streams.SeasonBatchEpisode
 import com.nuvio.app.features.streams.StreamAutoPlayPolicy
 import com.nuvio.app.features.tmdb.TmdbSettingsRepository
 import com.nuvio.app.features.tmdb.TmdbService
@@ -189,6 +202,8 @@ fun MetaDetailsScreen(
     onBack: () -> Unit,
     onPlay: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
     onPlayManually: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
+    onDownloadSeason: ((type: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, episodes: List<SeasonBatchEpisode>) -> Unit)? = null,
+    onDownloadSource: ((type: String, videoId: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, seasonNumber: Int?, episodeNumber: Int?, episodeTitle: String?, episodeThumbnail: String?, pauseDescription: String?, resumePositionMs: Long?) -> Unit)? = null,
     onOpenMeta: ((MetaPreview) -> Unit)? = null,
     onCastClick: ((MetaPerson, String?) -> Unit)? = null,
     onCompanyClick: ((MetaCompany, String) -> Unit)? = null,
@@ -258,6 +273,8 @@ fun MetaDetailsScreen(
     var selectedEpisodeForActions by remember(type, id) { mutableStateOf<MetaVideo?>(null) }
     var selectedEpisodeZoomAnchor by remember(type, id) { mutableStateOf<PosterZoomAnchor?>(null) }
     var episodeToRate by remember(type, id) { mutableStateOf<MetaVideo?>(null) }
+    var seasonDownloadPrompt by remember(type, id) { mutableStateOf<SeasonDownloadPrompt?>(null) }
+    var deleteDownloadsRequest by remember(type, id) { mutableStateOf<DeleteDownloadsRequest?>(null) }
     val episodeOverlayHazeState = rememberHazeState()
     var selectedSeasonForActions by remember(type, id) { mutableStateOf<Int?>(null) }
     val commentsEnabled by remember {
@@ -1817,6 +1834,124 @@ fun MetaDetailsScreen(
                             ),
                         )
                     }
+                    // Downloaded content is not offered for download again.
+                    val downloadedEpisode = DownloadsRepository.findPlayableDownload(
+                        parentMetaId = meta.id,
+                        seasonNumber = selectedEpisode.season,
+                        episodeNumber = selectedEpisode.episode,
+                        videoId = selectedEpisode.id,
+                    )
+                    val downloadedSeasonEpisodes = seasonEpisodes.mapNotNull { episode ->
+                        DownloadsRepository.findPlayableDownload(
+                            parentMetaId = meta.id,
+                            seasonNumber = episode.season,
+                            episodeNumber = episode.episode,
+                            videoId = episode.id,
+                        )
+                    }
+                    if (
+                        onDownloadSource != null &&
+                        downloadedEpisode == null &&
+                        playbackAvailability.canStream(meta.type, selectedEpisode.id)
+                    ) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Rounded.Download,
+                                label = stringResource(Res.string.download_action_label),
+                                onSelected = {
+                                    val playbackVideoId = buildPlaybackVideoId(
+                                        parentMetaId = meta.id,
+                                        seasonNumber = selectedEpisode.season,
+                                        episodeNumber = selectedEpisode.episode,
+                                        fallbackVideoId = selectedEpisode.id,
+                                    )
+                                    onDownloadSource.invoke(
+                                        meta.type,
+                                        selectedEpisode.id.takeIf { it.isNotBlank() } ?: playbackVideoId,
+                                        meta.id,
+                                        meta.type,
+                                        meta.name,
+                                        meta.logo,
+                                        meta.poster,
+                                        meta.background,
+                                        selectedEpisode.season,
+                                        selectedEpisode.episode,
+                                        selectedEpisode.title,
+                                        selectedEpisode.thumbnail,
+                                        selectedEpisode.overview,
+                                        null,
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                    // Delete what is downloaded: this episode, and the season when all of it is.
+                    if (downloadedEpisode != null) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Default.DeleteOutline,
+                                label = deleteDownloadLabel(DeleteDownloadsKind.Episode),
+                                isDestructive = true,
+                                exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                onSelected = {
+                                    deleteDownloadsRequest = DeleteDownloadsRequest(
+                                        DeleteDownloadsKind.Episode,
+                                        listOf(downloadedEpisode.id),
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                    if (seasonEpisodes.isNotEmpty() && downloadedSeasonEpisodes.size == seasonEpisodes.size) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Default.DeleteOutline,
+                                label = deleteDownloadLabel(DeleteDownloadsKind.Season),
+                                isDestructive = true,
+                                exitAnimation = PosterZoomOverlayExitAnimation.COLLAPSE,
+                                onSelected = {
+                                    deleteDownloadsRequest = DeleteDownloadsRequest(
+                                        DeleteDownloadsKind.Season,
+                                        downloadedSeasonEpisodes.map { it.id },
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                    if (
+                        onDownloadSeason != null &&
+                        seasonEpisodes.isNotEmpty() &&
+                        downloadedSeasonEpisodes.size < seasonEpisodes.size &&
+                        playbackAvailability.canStream(meta.type, selectedEpisode.id)
+                    ) {
+                        add(
+                            PosterZoomOverlayAction(
+                                icon = Icons.Rounded.Download,
+                                label = stringResource(Res.string.season_download_action),
+                                onSelected = {
+                                    val watched = seasonEpisodes.filter { episode ->
+                                        isEpisodeWatchedForActions(
+                                            meta = meta,
+                                            episode = episode,
+                                            watchedKeys = watchedUiState.watchedKeys,
+                                            progressByVideoId = progressByVideoId,
+                                        )
+                                    }
+                                    val prompt = SeasonDownloadPrompt(
+                                        meta = meta,
+                                        allEpisodes = seasonEpisodes,
+                                        unwatchedEpisodes = seasonEpisodes - watched.toSet(),
+                                    )
+                                    // Ask only when the season is partly watched.
+                                    if (watched.isEmpty() || watched.size == seasonEpisodes.size) {
+                                        startSeasonDownload(onDownloadSeason, prompt.meta, prompt.allEpisodes)
+                                    } else {
+                                        seasonDownloadPrompt = prompt
+                                    }
+                                },
+                            ),
+                        )
+                    }
                 },
                 hazeState = episodeOverlayHazeState,
                 onDismissed = {
@@ -1824,6 +1959,38 @@ fun MetaDetailsScreen(
                     selectedEpisodeZoomAnchor = null
                 },
             )
+        }
+
+        DeleteDownloadsHost(deleteDownloadsRequest) { deleteDownloadsRequest = null }
+
+        seasonDownloadPrompt?.let { prompt ->
+            DialogSurface(
+                onDismissRequest = { seasonDownloadPrompt = null },
+                title = stringResource(Res.string.season_download_prompt_title),
+                message = stringResource(
+                    Res.string.season_download_prompt_message,
+                    prompt.allEpisodes.size - prompt.unwatchedEpisodes.size,
+                    prompt.allEpisodes.size,
+                ),
+            ) {
+                DialogButtons {
+                    DialogButton(
+                        text = stringResource(Res.string.season_download_prompt_unwatched, prompt.unwatchedEpisodes.size),
+                        onClick = {
+                            seasonDownloadPrompt = null
+                            onDownloadSeason?.let { startSeasonDownload(it, prompt.meta, prompt.unwatchedEpisodes) }
+                        },
+                    )
+                    DialogButton(
+                        text = stringResource(Res.string.season_download_prompt_all, prompt.allEpisodes.size),
+                        onClick = {
+                            seasonDownloadPrompt = null
+                            onDownloadSeason?.let { startSeasonDownload(it, prompt.meta, prompt.allEpisodes) }
+                        },
+                        style = DialogButtonStyle.Primary,
+                    )
+                }
+            }
         }
 
         val ratedEpisode = episodeToRate
@@ -2607,4 +2774,32 @@ private fun Color.blendTowards(target: Color, fraction: Float): Color {
         blue = blue + (target.blue - blue) * clamped,
         alpha = alpha + (target.alpha - alpha) * clamped,
     )
+}
+
+
+private class SeasonDownloadPrompt(
+    val meta: MetaDetails,
+    val allEpisodes: List<MetaVideo>,
+    val unwatchedEpisodes: List<MetaVideo>,
+)
+
+private fun startSeasonDownload(
+    action: (type: String, parentMetaId: String, parentMetaType: String, title: String, logo: String?, poster: String?, background: String?, episodes: List<SeasonBatchEpisode>) -> Unit,
+    meta: MetaDetails,
+    episodes: List<MetaVideo>,
+) {
+    val batch = episodes
+        .filter { it.season != null && it.episode != null }
+        .sortedWith(compareBy({ it.season }, { it.episode }))
+        .map {
+            SeasonBatchEpisode(
+                videoId = it.id,
+                season = checkNotNull(it.season),
+                episode = checkNotNull(it.episode),
+                title = it.title,
+                thumbnail = it.thumbnail,
+            )
+        }
+    if (batch.isEmpty()) return
+    action(meta.type, meta.id, meta.type, meta.name, meta.logo, meta.poster, meta.background, batch)
 }
