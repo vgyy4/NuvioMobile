@@ -122,3 +122,34 @@ internal fun chooseOtherProfileDownload(
             )
         }
         .minWithOrNull(compareBy<OtherProfileDownload>({ !it.isSameSource }, { !it.isComplete }))
+
+/** A download record: the profile whose list it is in and its id. */
+internal data class DownloadRef(val profileId: Int, val itemId: String)
+
+/** [newLeader] takes over a running download; the [remainingFollowers] then follow it. */
+internal data class LeaderPromotion(
+    val newLeader: DownloadRef,
+    val remainingFollowers: List<DownloadRef>,
+)
+
+/**
+ * Who takes over a running download whose leader [removed] stops leading (it is deleted or
+ * replaced): the first of the [followers], in the order they started following. The others keep
+ * following, now the new leader. Null when nobody else is left, in which case the download simply
+ * ends with its leader.
+ */
+internal fun planLeaderPromotion(followers: List<DownloadRef>, removed: DownloadRef): LeaderPromotion? {
+    val candidates = followers.filter { it != removed }
+    val newLeader = candidates.firstOrNull() ?: return null
+    return LeaderPromotion(newLeader, candidates.drop(1))
+}
+
+/**
+ * Whether the app has to re-attach to a running download before anyone can follow it: it claims to
+ * be downloading ([leaderStatus]) but nothing in this app run drives it ([leaderHasLiveTransfer] is
+ * false), e.g. after the app was restarted while another profile's download was running. The system
+ * may still be transferring it, so it is re-attached (never started a second time); waiting for it
+ * without that would wait forever.
+ */
+internal fun leaderNeedsReattach(leaderStatus: DownloadStatus, leaderHasLiveTransfer: Boolean): Boolean =
+    leaderStatus == DownloadStatus.Downloading && !leaderHasLiveTransfer
