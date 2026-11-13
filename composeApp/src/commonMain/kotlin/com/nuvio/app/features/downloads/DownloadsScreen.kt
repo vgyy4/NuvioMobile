@@ -1,10 +1,6 @@
 package com.nuvio.app.features.downloads
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,7 +21,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,15 +32,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import com.nuvio.app.core.i18n.localizedByteUnit
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.NuvioScreen
@@ -407,18 +399,14 @@ private fun LazyListScope.downloadsRootContent(
     }
 
     if (finished.isNotEmpty()) {
-        item(key = "downloads-finished-header") {
-            FinishedWatchingHeader(onDeleteAll = onDeleteAllFinished)
-        }
-        items(
-            items = finished,
-            key = { "finished-${it.id}" },
-        ) { item ->
-            FinishedDownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onLongPress = { onFinishedLongPress(item) },
-                onTrash = { onFinishedTrash(item) },
+        item(key = "downloads-finished") {
+            DownloadsFinishedShelf(
+                items = finished,
+                watchedKeys = watchedKeys,
+                onClick = onOpenDownload,
+                onLongClick = onFinishedLongPress,
+                onTrash = onFinishedTrash,
+                onDeleteAll = onDeleteAllFinished,
             )
         }
     }
@@ -688,121 +676,6 @@ private fun downloadDisplaySubtitle(
         item.episodeTitle?.trim().orEmpty().takeIf { it.isNotBlank() && it != displayTitle },
         item.title.trim().takeIf { it.isNotBlank() && it != displayTitle },
     ).filterNotNull().joinToString(" • ")
-}
-
-@Composable
-private fun FinishedWatchingHeader(onDeleteAll: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp, end = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(Res.string.downloads_section_finished),
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = FontWeight.SemiBold,
-        )
-        TextButton(onClick = onDeleteAll) {
-            Text(text = stringResource(Res.string.downloads_delete_finished))
-        }
-    }
-}
-
-/** A downloaded movie or episode that was watched to the end: tap plays, long-press opens the menu, the trash deletes it. */
-@Composable
-private fun FinishedDownloadRow(
-    item: DownloadItem,
-    onOpen: () -> Unit,
-    onLongPress: () -> Unit,
-    onTrash: () -> Unit,
-) {
-    val displayTitle = item.displayTitle()
-    val displaySubtitle = downloadDisplaySubtitle(item = item, displayTitle = displayTitle)
-    val image = item.episodeThumbnail ?: item.background ?: item.poster
-
-    // The padding sits outside the long-press target, so the lifted copy is exactly the card.
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .posterCardClickable(
-                    onClick = onOpen.takeIf { item.isPlayable },
-                    onLongClick = onLongPress,
-                    zoomImageUrl = image,
-                    zoomCornerRadius = 12.dp,
-                ),
-            shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-        ) {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 52.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(96.dp)
-                            .aspectRatio(16f / 9f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.surfaceContainer),
-                    ) {
-                        if (image != null) {
-                            AsyncImage(
-                                model = image,
-                                contentDescription = null,
-                                modifier = Modifier.matchParentSize(),
-                                contentScale = ContentScale.Crop,
-                            )
-                        }
-                    }
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text(
-                            text = displayTitle,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = displaySubtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = statusText(item),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = onTrash,
-                    modifier = Modifier.align(Alignment.TopEnd),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Delete,
-                        contentDescription = stringResource(Res.string.action_delete),
-                    )
-                }
-            }
-        }
-    }
 }
 
 @Composable
