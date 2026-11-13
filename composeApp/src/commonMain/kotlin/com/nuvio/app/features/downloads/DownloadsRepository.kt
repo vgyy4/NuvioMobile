@@ -3,6 +3,7 @@ package com.nuvio.app.features.downloads
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
+import com.nuvio.app.features.profiles.MAX_PROFILES
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.p2p.P2pSettingsRepository
 import com.nuvio.app.features.p2p.P2pDownloadStream
@@ -347,8 +348,7 @@ object DownloadsRepository {
         if (existing != null) {
             replacedExisting = true
             activeHandles.remove(existing.id)?.cancel()
-            DownloadsPlatformDownloader.removeFile(playableLocalFileUri(existing) ?: existing.localFileUri)
-            DownloadsPlatformDownloader.removePartialFile(existing.fileName)
+            deleteFilesUnlessShared(existing)
             currentItems.removeAll { it.id == existing.id }
         }
 
@@ -521,30 +521,74 @@ object DownloadsRepository {
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
 
         activeHandles.remove(downloadId)?.cancel()
-        DownloadsPlatformDownloader.removeFile(playableLocalFileUri(item) ?: item.localFileUri)
-        DownloadsPlatformDownloader.removePartialFile(item.fileName)
+        deleteFilesUnlessShared(item)
 
         publish(_uiState.value.items.filterNot { it.id == downloadId })
         persist()
     }
 
     /**
-     * File names of the downloads of EVERY profile (all profiles share one downloads folder but each
-     * keeps its own list). Looking only at the active profile would make the unfinished downloads
-     * of the other profiles look like leftovers and delete them.
+     * Deletes the downloaded file, the partial file, the subtitles and the skip times of [item] (all
+     * of them are named after the file) unless another record, in any profile, still points to the
+     * same file. In that case only the record is removed by the caller and the files stay.
+     * Returns true if the files were deleted.
      */
-    private fun allProfilesKnownFileNames(): Set<String> {
-        val names = _uiState.value.items.mapTo(mutableSetOf()) { it.fileName }
-        val profileIds = ProfileRepository.state.value.profiles.map { it.profileIndex }
-        for (profileId in profileIds) {
+    private fun deleteFilesUnlessShared(item: DownloadItem): Boolean {
+        if (fileReferencedByAnother(item.fileName, excludingItemId = item.id)) return false
+        DownloadsPlatformDownloader.removeFile(playableLocalFileUri(item) ?: item.localFileUri)
+        DownloadsPlatformDownloader.removePartialFile(item.fileName)
+        return true
+    }
+
+    /**
+     * Whether a record other than [excludingItemId] of [excludingProfileId] points to the file
+     * [fileName]: the active profile's list is read from memory, every other profile's from its
+     * saved list. A saved list that cannot be read counts as "referenced": when unsure the file is
+     * kept.
+     */
+    private fun fileReferencedByAnother(
+        fileName: String,
+        excludingItemId: String,
+        excludingProfileId: Int = ProfileRepository.activeProfileId,
+    ): Boolean {
+        val itemsByProfile = allProfileItems() ?: return true
+        return isFileReferencedElsewhere(fileName, excludingProfileId, excludingItemId, itemsByProfile)
+    }
+
+    /** The profiles whose saved downloads count: the known profiles (all possible ones before they are loaded). */
+    private fun profileIdsToScan(): Set<Int> {
+        val known = ProfileRepository.state.value.profiles.map { it.profileIndex }
+        val ids = if (known.isNotEmpty()) known else (1..MAX_PROFILES).toList()
+        return (ids + ProfileRepository.activeProfileId).toSet()
+    }
+
+    /**
+     * The downloads of EVERY profile (all profiles share one downloads folder but each keeps its own
+     * list): the active profile's from memory, the others from their saved payloads. Null when a
+     * saved payload exists but cannot be read, because then the other profile's files are unknown.
+     */
+    private fun allProfileItems(): Map<Int, List<DownloadItem>>? {
+        val activeProfileId = ProfileRepository.activeProfileId
+        val result = mutableMapOf<Int, List<DownloadItem>>()
+        for (profileId in profileIdsToScan()) {
+            if (profileId == activeProfileId) {
+                result[profileId] = _uiState.value.items
+                continue
+            }
             val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
             if (payload.isEmpty()) continue
-            runCatching { DownloadsCodec.decodeItems(payload) }
-                .getOrNull()
-                ?.forEach { names += it.fileName }
+            result[profileId] = DownloadsCodec.decodeItemsOrNull(payload) ?: return null
         }
-        return names
+        return result
     }
+
+    /**
+     * File names of the downloads of EVERY profile. Looking only at the active profile would make
+     * the unfinished downloads of the other profiles look like leftovers and delete them. Null when
+     * some profile's list cannot be read: then nothing is swept.
+     */
+    private fun allProfilesKnownFileNames(): Set<String>? =
+        allProfileItems()?.values?.flatMapTo(mutableSetOf<String>()) { items -> items.map { it.fileName } }
 
     private fun loadFromDisk() {
         _hasUnseenCompleted.value = false
@@ -554,7 +598,8 @@ object DownloadsRepository {
         // Delayed and age-checked so a download started right now is never touched.
         p2pScope.launch {
             delay(ORPHAN_SWEEP_DELAY_MS)
-            DownloadsPlatformDownloader.removeOrphanedPartialFiles(allProfilesKnownFileNames())
+            val knownFileNames = allProfilesKnownFileNames() ?: return@launch
+            DownloadsPlatformDownloader.removeOrphanedPartialFiles(knownFileNames)
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
@@ -1020,6 +1065,12 @@ private object DownloadsCodec {
         runCatching {
             json.decodeFromString<StoredDownloadsPayload>(payload).items
         }.getOrDefault(emptyList())
+
+    /** Like [decodeItems], but null when the payload cannot be decoded (instead of an empty list). */
+    fun decodeItemsOrNull(payload: String): List<DownloadItem>? =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).items
+        }.getOrNull()
 
     fun decodeDeselectedLanguages(payload: String): Set<String> =
         runCatching {
