@@ -227,6 +227,7 @@ internal fun MainTabsDestination(
                         requests = requests,
                         state = state,
                         actions = tabActions,
+                        prewarmOtherTabs = iosComposeShell && initialHomeReady && rootRouteActive,
                         modifier = Modifier
                             .fillMaxSize()
                             .then(if (isTabletLayout || navBarStyleSetting != NavBarStyle.CLASSIC) Modifier.hazeSource(state = navBarHazeState) else Modifier)

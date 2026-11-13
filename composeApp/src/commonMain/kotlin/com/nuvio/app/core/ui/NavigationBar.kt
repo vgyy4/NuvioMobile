@@ -34,6 +34,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.withFrameNanos
@@ -87,6 +88,8 @@ import org.jetbrains.compose.resources.painterResource
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -166,18 +169,49 @@ fun rememberNuvioNavBarScrollState(): NuvioNavBarScrollState {
 }
 
 /**
- * Observes (never consumes) touches on the bar so the glass can react on touch-down. Runs in the
- * Initial/Final passes, so taps, the profile long-press and drags reach their own handlers.
+ * Touch handling of the glass bar, a port of the Android jelly bar's `detectJellyTabGestures`.
+ * Touch-down only observes (the tab under the finger starts the capsule's swell; a plain tap still
+ * reaches the item's own click). Once the finger has moved past the touch slop the gesture is
+ * claimed: the capsule follows the finger across the tabs and the nearest tab is selected on
+ * release. A press on the profile tab that has been held long enough to open its popup is left to
+ * that popup.
  */
 private fun Modifier.glassPressFeedback(pillState: NavPillState): Modifier = pointerInput(pillState) {
+    val slop = viewConfiguration.touchSlop
+    val longPressMillis = viewConfiguration.longPressTimeoutMillis
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         pillState.onPress(down.position.x, down.position.y)
+        val holdsPopup = pillState.holdsPopupAt(down.position.x)
+        var claimed = false
+        var handled = false
         try {
-            do {
-                val event = awaitPointerEvent(PointerEventPass.Final)
-            } while (event.changes.any { it.pressed })
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!claimed) {
+                    val delta = change.position - down.position
+                    if (max(abs(delta.x), abs(delta.y)) > slop) {
+                        val held = change.uptimeMillis - down.uptimeMillis >= longPressMillis
+                        if (holdsPopup && held) break
+                        claimed = pillState.beginDrag()
+                    }
+                }
+                if (claimed) {
+                    change.consume()
+                    pillState.onDrag(change.position.x - down.position.x)
+                    if (!change.pressed) {
+                        val chosen = pillState.endDrag()
+                        handled = true
+                        chosen?.onClick?.invoke()
+                        break
+                    }
+                } else if (!change.pressed) {
+                    break
+                }
+            }
         } finally {
+            if (claimed && !handled) pillState.abortDrag()
             pillState.onRelease()
         }
     }
@@ -512,6 +546,12 @@ private class NavItemBounds {
     var top = 0f
     var width = 0f
     var height = 0f
+
+    /** Click of the item, so a drag that ends on it can select it. */
+    var onClick: (() -> Unit)? = null
+
+    /** True for the profile tab, whose own long-press popup takes over a held press. */
+    var holdsPopup = false
 }
 
 /**
@@ -594,6 +634,25 @@ private class NavPillState(private val scope: CoroutineScope) {
     private var shapeTarget = 1.0
     private var loop: Job? = null
 
+    // Hold-and-drag: the capsule follows the finger (Android `JellyMotion.drag`), the nearest tab wins.
+    private var ordered: List<NavItemBounds> = emptyList()
+    private val dragSpring = GlassSpring(0.0, 1000.0, 1.0)
+    private var dragTarget = 0.0
+    private var dragStartIndex = 0.0
+    private var dragging = false
+    private var dragLeft = 0f
+    private var dragTop = 0f
+    private var dragWidth = 0f
+    private var dragHeight = 0f
+
+    /** True while the capsule is being dragged; read in the draw/layer phases only. */
+    var dragActive by mutableStateOf(false)
+        private set
+
+    /** Fractional tab index of the dragged capsule (0 = first tab on the left). */
+    var dragIndex by mutableFloatStateOf(0f)
+        private set
+
     /** Set by the bar: the tap feel below is only for the glass bar; the classic bar is unchanged. */
     var glassMode = false
 
@@ -663,6 +722,7 @@ private class NavPillState(private val scope: CoroutineScope) {
         bounds.top = top
         bounds.width = width
         bounds.height = height
+        ordered = items.filter { it.placed }.sortedBy { it.left }
         if (bounds === target) layoutTick++
     }
 
@@ -687,37 +747,127 @@ private class NavPillState(private val scope: CoroutineScope) {
         if (previous != null && previous.placed && bounds.placed) {
             // Start from where the pill is currently drawn so an interrupted slide continues smoothly.
             val t = progress.value
+            var left = previous.left
+            var top = previous.top
+            var width = previous.width
+            var height = previous.height
             if (hasFrom) {
-                fromLeft += (previous.left - fromLeft) * t
-                fromTop += (previous.top - fromTop) * t
-                fromWidth += (previous.width - fromWidth) * t
-                fromHeight += (previous.height - fromHeight) * t
-            } else {
-                fromLeft = previous.left
-                fromTop = previous.top
-                fromWidth = previous.width
-                fromHeight = previous.height
+                left = fromLeft + (previous.left - fromLeft) * t
+                top = fromTop + (previous.top - fromTop) * t
+                width = fromWidth + (previous.width - fromWidth) * t
+                height = fromHeight + (previous.height - fromHeight) * t
             }
-            hasFrom = true
-            target = bounds
-            val tabWidth = bounds.width.coerceAtLeast(1f)
-            travelTabs = ((bounds.left + bounds.width / 2f) - (fromLeft + fromWidth / 2f)) / tabWidth
-            scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                progress.snapTo(0f)
-                progress.animateTo(
-                    targetValue = 1f,
-                    animationSpec = spring(
-                        dampingRatio = 1f,
-                        stiffness = 1000f,
-                        visibilityThreshold = 0.001f,
-                    ),
-                )
-            }
+            startSlide(bounds, left, top, width, height)
         } else {
             hasFrom = false
             target = bounds
             layoutTick++
         }
+    }
+
+    /** Slides the capsule from the given rect to [bounds] (the same spring as a tab switch). */
+    private fun startSlide(bounds: NavItemBounds, left: Float, top: Float, width: Float, height: Float) {
+        fromLeft = left
+        fromTop = top
+        fromWidth = width
+        fromHeight = height
+        hasFrom = true
+        target = bounds
+        val tabWidth = bounds.width.coerceAtLeast(1f)
+        travelTabs = ((bounds.left + bounds.width / 2f) - (fromLeft + fromWidth / 2f)) / tabWidth
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            progress.snapTo(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = 1f,
+                    stiffness = 1000f,
+                    visibilityThreshold = 0.001f,
+                ),
+            )
+        }
+    }
+
+    fun holdsPopupAt(x: Float): Boolean = itemAt(x)?.holdsPopup == true
+
+    /** Distance between two neighbouring tabs, in px. */
+    private fun tabPitch(): Float =
+        if (ordered.size > 1) (ordered[1].left - ordered[0].left).coerceAtLeast(1f) else 1f
+
+    /** Where the capsule is drawn right now (centre x), whether sliding or resting. */
+    private fun drawnCenterX(): Float {
+        val current = target ?: return 0f
+        val currentCenter = current.left + current.width / 2f
+        if (!hasFrom) return currentCenter
+        val fromCenter = fromLeft + fromWidth / 2f
+        return fromCenter + (currentCenter - fromCenter) * progress.value
+    }
+
+    /** Fills the drag rect for the fractional tab index [position]; false when nothing is placed. */
+    private fun rectAt(position: Float): Boolean {
+        val list = ordered
+        if (list.isEmpty()) return false
+        val p = position.coerceIn(0f, (list.size - 1).toFloat())
+        val i = floor(p).toInt().coerceAtMost(list.size - 1)
+        val j = min(i + 1, list.size - 1)
+        val f = p - i
+        val a = list[i]
+        val b = list[j]
+        dragLeft = a.left + (b.left - a.left) * f
+        dragTop = a.top + (b.top - a.top) * f
+        dragWidth = a.width + (b.width - a.width) * f
+        dragHeight = a.height + (b.height - a.height) * f
+        return true
+    }
+
+    /** Called once the finger has moved past the touch slop; false when there is nothing to drag. */
+    fun beginDrag(): Boolean {
+        val list = ordered
+        if (list.size < 2 || target == null) return false
+        val pitch = tabPitch()
+        val first = list[0]
+        val position = ((drawnCenterX() - (first.left + first.width / 2f)) / pitch)
+            .coerceIn(0f, (list.size - 1).toFloat())
+        val hit = list.indexOf(target)
+        dragStartIndex = if (hit >= 0) hit.toDouble() else position.toDouble()
+        dragTarget = dragStartIndex
+        dragSpring.value = position.toDouble()
+        dragSpring.velocity = 0.0
+        dragging = true
+        dragIndex = position
+        dragActive = true
+        // Stop a slide that the touch-down started; the capsule is driven by the finger now.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { progress.snapTo(1f) }
+        ensureRunning()
+        return true
+    }
+
+    /** Finger moved [dx] px from where it went down (Android `JellyMotion.drag`). */
+    fun onDrag(dx: Float) {
+        if (!dragging) return
+        dragTarget = (dragStartIndex + dx / tabPitch()).coerceIn(0.0, (ordered.size - 1).toDouble())
+    }
+
+    /** Finger lifted: the capsule settles on the nearest tab, which is returned so it can be selected. */
+    fun endDrag(): NavItemBounds? {
+        if (!dragging) return null
+        val list = ordered
+        val chosen = list.getOrNull(floor(dragTarget + 0.5).toInt().coerceIn(0, list.size - 1))
+        settleDrag(chosen)
+        return chosen
+    }
+
+    /** The gesture was cancelled: go back to the selected tab. */
+    fun abortDrag() {
+        if (!dragging) return
+        settleDrag(committed)
+    }
+
+    private fun settleDrag(to: NavItemBounds?) {
+        dragging = false
+        dragActive = false
+        if (to == null || !rectAt(dragSpring.value.toFloat())) return
+        startSlide(to, dragLeft, dragTop, dragWidth, dragHeight)
     }
 
     private fun ensureRunning() {
@@ -734,7 +884,7 @@ private class NavPillState(private val scope: CoroutineScope) {
     }
 
     private fun isRunning(): Boolean =
-        pressed || releasePending || !velocity.isAtRest(0.0) || !press.isAtRest(0.0) ||
+        pressed || dragging || releasePending || !velocity.isAtRest(0.0) || !press.isAtRest(0.0) ||
             !shapeX.isAtRest(1.0) || !trackPress.isAtRest(1.0)
 
     /** Android `JellyMotion.advance` + `publish`, for the springs that are not the slide itself. */
@@ -742,7 +892,15 @@ private class NavPillState(private val scope: CoroutineScope) {
         val delta = seconds.coerceIn(0.0, 0.064)
         val maxIndex = (items.size - 1).coerceAtLeast(0)
         // Position velocity in tab units per second, divided by maxIndex, only while the finger is down.
-        val indexVelocity = if (hasFrom) progress.velocity.toDouble() * travelTabs else 0.0
+        if (dragging) {
+            dragSpring.advance(dragTarget, delta)
+            dragIndex = dragSpring.value.toFloat()
+        }
+        val indexVelocity = when {
+            dragging -> dragSpring.velocity
+            hasFrom -> progress.velocity.toDouble() * travelTabs
+            else -> 0.0
+        }
         velocity.advance(if (pressed && maxIndex > 0) indexVelocity / maxIndex else 0.0, delta)
         val remaining = if (hasFrom) abs(1f - progress.value) * abs(travelTabs) else 0f
         if (releasePending && remaining < maxOf(1, maxIndex) * 0.025) {
@@ -767,15 +925,8 @@ private class NavPillState(private val scope: CoroutineScope) {
     fun contentScaleFor(bounds: NavItemBounds): Float {
         val scale = contentScale
         if (scale == 1f) return 1f
-        val t = progress.value
-        val current = target ?: return 1f
-        val currentCenter = current.left + current.width / 2f
-        val center = if (hasFrom) {
-            val fromCenter = fromLeft + fromWidth / 2f
-            fromCenter + (currentCenter - fromCenter) * t
-        } else {
-            currentCenter
-        }
+        if (target == null) return 1f
+        val center = if (dragActive && rectAt(dragIndex)) dragLeft + dragWidth / 2f else drawnCenterX()
         val itemCenter = bounds.left + bounds.width / 2f
         val coverage = (1f - abs(center - itemCenter) / bounds.width.coerceAtLeast(1f)).coerceIn(0f, 1f)
         return 1f + (scale - 1f) * coverage
@@ -794,7 +945,12 @@ private class NavPillState(private val scope: CoroutineScope) {
         var top = current.top
         var width = current.width
         var height = current.height
-        if (hasFrom) {
+        if (glass && dragActive && rectAt(dragIndex)) {
+            left = dragLeft
+            top = dragTop
+            width = dragWidth
+            height = dragHeight
+        } else if (hasFrom) {
             left = fromLeft + (left - fromLeft) * t
             top = fromTop + (top - fromTop) * t
             width = fromWidth + (width - fromWidth) * t
@@ -930,6 +1086,7 @@ private class NuvioNavigationBarScopeImpl(
         val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
+            itemBounds.onClick = onClick
             if (selected) pillState.onItemSelected(itemBounds)
         }
 
@@ -996,6 +1153,7 @@ private class NuvioNavigationBarScopeImpl(
         val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
+            itemBounds.onClick = onClick
             if (selected) pillState.onItemSelected(itemBounds)
         }
 
@@ -1060,6 +1218,8 @@ private class NuvioNavigationBarScopeImpl(
         val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
+            itemBounds.onClick = onClick
+            itemBounds.holdsPopup = true
             if (selected) pillState.onItemSelected(itemBounds)
         }
 

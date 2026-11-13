@@ -127,12 +127,14 @@ internal fun AppTabHost(
     state: AppTabState,
     actions: AppTabActions,
     modifier: Modifier = Modifier,
+    prewarmOtherTabs: Boolean = false,
 ) {
     RootTabHost(
         selectedTab = selectedTab,
         modifier = modifier,
         active = state.rootActionsEnabled,
         profileId = state.profileId,
+        prewarmOtherTabs = prewarmOtherTabs,
     ) { tab ->
         when (tab) {
             AppScreenTab.Home -> if (state.offlineDownloadsHome) {

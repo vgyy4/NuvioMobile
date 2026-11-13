@@ -8,6 +8,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -30,6 +34,7 @@ import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.compose.rememberLifecycleOwner
 import com.nuvio.app.core.ui.LocalScreenActive
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -38,6 +43,7 @@ internal fun RootTabHost(
     modifier: Modifier = Modifier,
     active: Boolean = true,
     profileId: Int? = null,
+    prewarmOtherTabs: Boolean = false,
     content: @Composable (AppScreenTab) -> Unit,
 ) {
     val parentLifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
@@ -50,7 +56,26 @@ internal fun RootTabHost(
     key(profileId) {
         val tabStateHolder = rememberSaveableStateHolder()
         val visitedTabs = remember { mutableSetOf<AppScreenTab>() }
-        val displayedTabs = remember(selectedTab) { (visitedTabs + selectedTab).toList() }
+        // Tabs composed and measured ahead of their first visit (see prewarmOtherTabs): composing a
+        // page the first time is what makes the first tab switches hitch on old devices. They stay
+        // inactive, are never placed or drawn, and are only measured for a moment while warming.
+        var warmTabs by remember { mutableStateOf(emptySet<AppScreenTab>()) }
+        var measuringTab by remember { mutableStateOf<AppScreenTab?>(null) }
+        val currentSelectedTab by rememberUpdatedState(selectedTab)
+        val displayedTabs = remember(selectedTab, warmTabs) { (visitedTabs + warmTabs + selectedTab).toList() }
+        LaunchedEffect(prewarmOtherTabs) {
+            if (!prewarmOtherTabs) return@LaunchedEffect
+            // After the first screen and the nav bar warm-up are done.
+            delay(7_000)
+            for (tab in AppScreenTab.entries) {
+                if (tab == currentSelectedTab || tab in visitedTabs || tab in warmTabs) continue
+                warmTabs = warmTabs + tab
+                measuringTab = tab
+                delay(1_500)
+                measuringTab = null
+                delay(500)
+            }
+        }
         // Panes created after the first one (first visit of a tab) fade in too; the initial tab does not.
         val animateNewPanes = visitedTabs.isNotEmpty()
         SideEffect { visitedTabs += selectedTab }
@@ -72,6 +97,10 @@ internal fun RootTabHost(
                 }
             },
         ) { measurables, constraints ->
+            measuringTab?.let { warming ->
+                val index = displayedTabs.indexOf(warming)
+                if (index >= 0 && warming != selectedTab) measurables[index].measure(constraints)
+            }
             val placeable = measurables[displayedTabs.indexOf(selectedTab)].measure(constraints)
             layout(placeable.width, placeable.height) {
                 placeable.placeRelative(0, 0)
