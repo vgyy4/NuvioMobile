@@ -30,10 +30,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "P2pStreamingEngine"
 private const val DIAGNOSTIC_TAG = "NuvioP2PDiag"
 private const val DIAGNOSTIC_SAMPLE_INTERVAL_MS = 1_000L
+private const val CACHE_RECLAIM_TIMEOUT_MS = 15_000L
 
 internal fun buildNuvioEngineConfig(
     stateDirectory: File,
@@ -140,6 +142,9 @@ actual object P2pStreamingEngine {
     private val knownTorrentIds = mutableSetOf<String>()
     private var diagnosticRequestSequence = 0L
 
+    // Streams opened for downloads: stream id -> the engine that serves it.
+    private val downloadStreams = java.util.concurrent.ConcurrentHashMap<String, NuvioEngine>()
+
     fun initialize(context: Context) {
         appContext = context.applicationContext
     }
@@ -147,6 +152,67 @@ actual object P2pStreamingEngine {
     actual suspend fun startStream(request: P2pStreamRequest): String = withContext(Dispatchers.IO) {
         startMutex.withLock { startStreamLocked(request) }
     }
+
+    actual suspend fun openDownloadStream(request: P2pStreamRequest): P2pDownloadStream =
+        withContext(Dispatchers.IO) {
+            // Held for the whole start, like a playback start: it also guards `knownTorrentIds`.
+            startMutex.withLock {
+                var preparedStream: NuvioStream? = null
+                val resolvedEngine = ensureEngine()
+                try {
+                    val magnetUri = buildP2pMagnetUri(
+                        request.infoHash,
+                        (DEFAULT_TRACKERS + request.trackers).distinct(),
+                    )
+                    val canonicalHash = canonicalP2pInfoHash(request.infoHash)
+                    val torrentId = if (canonicalHash in knownTorrentIds) {
+                        canonicalHash
+                    } else {
+                        resolvedEngine.addMagnet(magnetUri).also { knownTorrentIds += it }
+                    }
+                    currentCoroutineContext().ensureActive()
+                    val stream = resolvedEngine.prepareStream(
+                        torrentId = torrentId,
+                        fileIndex = request.fileIdx,
+                        filenameHint = request.filename,
+                        // TODO: with an engine library that has NuvioStreamMode (>= 0.1.7), pass
+                        // `mode = NuvioStreamMode.DOWNLOAD` here: verified-only data for saved files.
+                    )
+                    preparedStream = stream
+                    currentCoroutineContext().ensureActive()
+                    downloadStreams[stream.id] = resolvedEngine
+                    P2pDownloadStream(id = stream.id, localUrl = stream.url)
+                } catch (cancellation: CancellationException) {
+                    withContext(NonCancellable) {
+                        preparedStream?.let { stopPreparedStream(resolvedEngine, it.id) }
+                    }
+                    throw cancellation
+                } catch (error: Exception) {
+                    preparedStream?.let { stopPreparedStream(resolvedEngine, it.id) }
+                    throw error
+                }
+            }
+        }
+
+    actual suspend fun closeDownloadStream(stream: P2pDownloadStream): Unit =
+        withContext(NonCancellable + Dispatchers.IO) {
+            val owner = downloadStreams.remove(stream.id) ?: return@withContext
+            stopPreparedStream(owner, stream.id)
+            val engineIdle = downloadStreams.isEmpty() && currentStreamId == null
+            if (engineIdle) {
+                // `reclaimDiskCache` suspends until the engine has done it, and the engine only
+                // reclaims while nothing is being read. It is therefore requested only when
+                // nothing else is active, and bounded, so a download slot is never held up.
+                withTimeoutOrNull(CACHE_RECLAIM_TIMEOUT_MS) { runCatching { owner.reclaimDiskCache(0L) } }
+            }
+            // While other streams are active the engine enforces the cache limit by itself once
+            // it is idle again.
+            startMutex.withLock {
+                if (downloadStreams.isEmpty() && currentStreamId == null && engine === owner) {
+                    closeEngine(owner)
+                }
+            }
+        }
 
     actual suspend fun clearCache(): P2pCacheClearResult = withContext(Dispatchers.IO) {
         startMutex.withLock {
@@ -415,7 +481,8 @@ actual object P2pStreamingEngine {
         detached.streamId?.let { streamId ->
             stopPreparedStream(detached.engine, streamId)
         }
-        if (shutdownEngine) {
+        // Download streams keep the engine alive; it is closed when the last one closes.
+        if (shutdownEngine && downloadStreams.isEmpty()) {
             closeEngine(detached.engine)
         }
     }
@@ -456,7 +523,8 @@ actual object P2pStreamingEngine {
             torrentProfile = settings.torrentProfile,
             diskCacheCapacityBytes = settings.cacheSize.bytes,
         )
-        engine?.takeIf { engineConfigurationKey == configurationKey }?.let {
+        // A changed setting must not tear the engine down under running downloads.
+        engine?.takeIf { engineConfigurationKey == configurationKey || downloadStreams.isNotEmpty() }?.let {
             Log.i(
                 DIAGNOSTIC_TAG,
                 "engine reuse configuration=$configurationKey elapsedMs=${elapsedSince(startedAtMs)}",

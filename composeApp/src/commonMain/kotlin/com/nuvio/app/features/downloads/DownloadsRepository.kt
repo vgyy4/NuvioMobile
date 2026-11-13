@@ -1,9 +1,34 @@
 package com.nuvio.app.features.downloads
 
+import com.nuvio.app.core.build.AppFeaturePolicy
+import com.nuvio.app.core.sync.AppForegroundMonitor
+import com.nuvio.app.core.sync.AppVisibility
+import com.nuvio.app.features.p2p.P2pSettingsRepository
+import com.nuvio.app.features.p2p.P2pDownloadStream
+import com.nuvio.app.features.p2p.P2pStreamRequest
+import com.nuvio.app.features.p2p.P2pStreamingEngine
+import com.nuvio.app.features.p2p.buildP2pMagnetUri
+import com.nuvio.app.features.p2p.formatP2pMegabytes
 import com.nuvio.app.features.player.SubtitleRequestExtras
 import com.nuvio.app.features.player.addonSubtitleRequests
+import com.nuvio.app.features.player.computeVideoHash
 import com.nuvio.app.features.streams.StreamItem
+import com.nuvio.app.features.streams.StreamSubtitle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,10 +44,36 @@ object DownloadsRepository {
     private val _uiState = MutableStateFlow(DownloadsUiState())
     val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
 
+    // Subtitle languages (normalized codes) the user had ticked in the download options last time.
+    // null = nothing saved yet: every language is ticked by default. Once a choice is saved, a
+    // language is ticked only if it is in this set, so languages never offered before start unticked.
+    private val _selectedSubtitleLanguages = MutableStateFlow<Set<String>?>(null)
+    val selectedSubtitleLanguages: StateFlow<Set<String>?> = _selectedSubtitleLanguages.asStateFlow()
+
+    // Fallback for data written by older app versions, which remembered the UNticked languages.
+    // Only read while no selection is saved; kept unchanged in the local payload until the user
+    // saves a new selection (then it is cleared) and never written to the cloud.
+    private var legacyDeselectedSubtitleLanguages: Set<String> = emptySet()
+
+    // Whether the home screen turns into the downloads view while the device is offline.
+    private val _offlineDownloadsHome = MutableStateFlow(true)
+    val offlineDownloadsHome: StateFlow<Boolean> = _offlineDownloadsHome.asStateFlow()
+
     private val _hasUnseenCompleted = MutableStateFlow(false)
     val hasUnseenCompleted: StateFlow<Boolean> = _hasUnseenCompleted.asStateFlow()
 
+    // Subtitles found by the last previews (newest last), so the download uses exactly the list
+    // the user chose from instead of asking the add-ons a second time. Updated atomically because
+    // season downloads queue episodes from another thread.
+    private val previewedSubtitles = MutableStateFlow<Map<String, PreviewedSubtitles>>(emptyMap())
+
     private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
+    private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // Limits how many torrents download at once; the rest wait their turn (first come, first served).
+    private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
+    private val pausedForBackground = mutableSetOf<String>()
+    private var foregroundJob: Job? = null
+    private var lastProgressPersistEpochMs = 0L
     private var hasLoaded = false
     private var nextDownloadOrdinal = 0L
 
@@ -44,9 +95,133 @@ object DownloadsRepository {
         activeHandles.clear()
         hasLoaded = false
         _hasUnseenCompleted.value = false
+        _selectedSubtitleLanguages.value = null
+        legacyDeselectedSubtitleLanguages = emptySet()
+        _offlineDownloadsHome.value = true
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
     }
+
+    fun setOfflineDownloadsHome(enabled: Boolean) {
+        ensureLoaded()
+        if (_offlineDownloadsHome.value == enabled) return
+        _offlineDownloadsHome.value = enabled
+        persist()
+    }
+
+    /** Deletes completed downloads (files, subtitles and skip times included). */
+    fun deleteDownloads(downloadIds: Collection<String>) {
+        ensureLoaded()
+        downloadIds.toList().forEach(::cancelDownload)
+    }
+
+    /**
+     * The languages to tick when the download options open, out of the [available] ones.
+     * - A saved selection exists: exactly the available languages that are in it (languages never
+     *   offered before are NOT ticked).
+     * - Only the legacy "unticked" list exists (older app version): everything except those.
+     * - Nothing saved: everything.
+     */
+    fun initialSubtitleSelection(available: List<String>): Set<String> {
+        ensureLoaded()
+        val saved = _selectedSubtitleLanguages.value
+        return when {
+            saved != null -> available.filterTo(mutableSetOf<String>()) { it in saved }
+            legacyDeselectedSubtitleLanguages.isNotEmpty() -> {
+                val deselected = legacyDeselectedSubtitleLanguages.mapTo(mutableSetOf<String>()) { canonicalSubtitleLanguage(it) }
+                available.filterTo(mutableSetOf<String>()) { it !in deselected }
+            }
+            else -> available.toSet()
+        }
+    }
+
+    /**
+     * Remembers the choice made in the download options: the ticked languages. Languages that were
+     * not offered this time keep their saved state.
+     */
+    fun rememberSubtitleSelection(offered: List<String>, ticked: List<String>) {
+        ensureLoaded()
+        val previous = _selectedSubtitleLanguages.value.orEmpty()
+        val updated = (previous - offered.toSet()) + ticked.map { canonicalSubtitleLanguage(it) }
+        if (updated == _selectedSubtitleLanguages.value) return
+        _selectedSubtitleLanguages.value = updated
+        legacyDeselectedSubtitleLanguages = emptySet()
+        persist()
+    }
+
+    /**
+     * Applies the choice synced from the cloud for this profile. [languages] is the saved
+     * selection; [legacyDeselected] is what older app versions synced (unticked languages), used
+     * only when [languages] is absent and nothing is saved locally.
+     */
+    fun replaceSelectedSubtitleLanguages(languages: Collection<String>?, legacyDeselected: Collection<String>?) {
+        ensureLoaded()
+        if (languages != null) {
+            val updated = languages.mapTo(mutableSetOf<String>()) { canonicalSubtitleLanguage(it) }
+            if (updated == _selectedSubtitleLanguages.value) return
+            _selectedSubtitleLanguages.value = updated
+            legacyDeselectedSubtitleLanguages = emptySet()
+            persist()
+        } else if (legacyDeselected != null && _selectedSubtitleLanguages.value == null) {
+            val updated = legacyDeselected.toSet()
+            if (updated == legacyDeselectedSubtitleLanguages) return
+            legacyDeselectedSubtitleLanguages = updated
+            persist()
+        }
+    }
+
+    /**
+     * The language keys of the subtitles that [stream] offers (its own and the add-ons'), looked up
+     * the way the player does (same add-on requests, with the video hash when it can be computed)
+     * and grouped like the player's subtitle picker. Empty when there is nothing to download.
+     */
+    suspend fun previewSubtitleLanguages(
+        contentType: String,
+        videoId: String,
+        stream: StreamItem,
+    ): List<String> {
+        ensureLoaded()
+        var extras = subtitleRequestExtras(stream, stream.playableDirectUrl)
+        val directUrl = stream.playableDirectUrl?.trim()
+        if (extras?.videoHash == null && directUrl != null && directUrl.isHttpUrl()) {
+            // Like the player: look subtitles up with the OpenSubtitles hash of the video if possible.
+            val hashed = try {
+                withTimeoutOrNull(SUBTITLE_HASH_TIMEOUT_MS) {
+                    computeVideoHash(directUrl, sanitizeRequestHeaders(stream.behaviorHints.proxyHeaders?.request))
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                null
+            }
+            if (hashed != null) {
+                extras = (extras ?: SubtitleRequestExtras()).copy(
+                    videoHash = hashed.first,
+                    videoSize = extras?.videoSize ?: hashed.second,
+                )
+            }
+        }
+        val found = DownloadSubtitles.discover(
+            requests = addonSubtitleRequests(type = contentType, videoId = videoId, extras = extras),
+            streamSubtitles = stream.externalSubtitles,
+        )
+        val key = previewKey(contentType, videoId, stream)
+        val previewed = PreviewedSubtitles(extras, found.subtitles, found.fromAddons)
+        previewedSubtitles.update { current ->
+            (current - key + (key to previewed)).toList().takeLast(MAX_PREVIEWED_SUBTITLES).toMap()
+        }
+        return subtitleLanguageKeys(found.subtitles)
+    }
+
+    private fun previewKey(contentType: String, videoId: String, stream: StreamItem): String =
+        "$contentType|$videoId|${stream.playableDirectUrl?.trim() ?: stream.p2pInfoHash}"
+
+    // The extras the player sends to subtitle add-ons for a stream: a torrent has no playback URL.
+    private fun subtitleRequestExtras(stream: StreamItem, sourceUrl: String?): SubtitleRequestExtras? =
+        if (sourceUrl == null) {
+            SubtitleRequestExtras.from(stream.behaviorHints)
+        } else {
+            SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl)
+        }
 
     fun findPlayableDownloadByVideoId(videoId: String?): DownloadItem? {
         ensureLoaded()
@@ -124,17 +299,32 @@ object DownloadsRepository {
         episodeTitle: String?,
         episodeThumbnail: String?,
         stream: StreamItem,
+        downloadSubtitles: Boolean = true,
+        subtitleLanguages: List<String> = emptyList(),
     ): DownloadEnqueueResult {
         ensureLoaded()
 
-        val sourceUrl = stream.playableDirectUrl
+        val directUrl = stream.playableDirectUrl
             ?.trim()
             ?.takeIf { it.isNotBlank() }
-            ?: return DownloadEnqueueResult.MissingUrl
-
-        if (!sourceUrl.isSupportedDownloadUrl()) {
+        // A torrent without an HTTP link is downloaded through the P2P engine instead.
+        val p2pInfoHash = if (directUrl == null && stream.isTorrentStream) stream.p2pInfoHash else null
+        if (directUrl == null && p2pInfoHash == null) return DownloadEnqueueResult.MissingUrl
+        if (directUrl != null && !directUrl.isSupportedDownloadUrl()) {
             return DownloadEnqueueResult.UnsupportedFormat
         }
+        if (p2pInfoHash != null) {
+            if (!AppFeaturePolicy.p2pEnabled || !P2pDownloadPlatform.isSupported) {
+                return DownloadEnqueueResult.P2pUnsupported
+            }
+            P2pSettingsRepository.ensureLoaded()
+            if (!P2pSettingsRepository.uiState.value.p2pEnabled) {
+                return DownloadEnqueueResult.P2pDisabled
+            }
+        }
+        val sourceUrl = directUrl
+            ?: runCatching { buildP2pMagnetUri(checkNotNull(p2pInfoHash), stream.p2pTrackers) }.getOrNull()
+            ?: return DownloadEnqueueResult.MissingUrl
 
         val now = DownloadsClock.nowEpochMs()
         val logicalKey = buildLogicalKey(
@@ -161,9 +351,17 @@ object DownloadsRepository {
             episodeNumber = episodeNumber,
             episodeTitle = episodeTitle,
             fallbackTitle = stream.streamLabel,
-            sourceUrl = sourceUrl,
+            extension = if (p2pInfoHash != null) {
+                stream.behaviorHints.filename.fileExtensionFromFileName() ?: "mkv"
+            } else {
+                sourceUrl.fileExtensionFromUrl()
+            },
             downloadId = downloadId,
         )
+
+        val previewId = previewKey(contentType, videoId, stream)
+        val previewed = previewedSubtitles.value[previewId]
+        if (previewed != null) previewedSubtitles.update { it - previewId }
 
         val item = DownloadItem(
             id = downloadId,
@@ -186,12 +384,28 @@ object DownloadsRepository {
             sourceUrl = sourceUrl,
             sourceHeaders = sanitizeRequestHeaders(stream.behaviorHints.proxyHeaders?.request),
             sourceResponseHeaders = sanitizeResponseHeaders(stream.behaviorHints.proxyHeaders?.response),
-            subtitleRequests = addonSubtitleRequests(
-                type = contentType,
-                videoId = videoId,
-                extras = SubtitleRequestExtras.from(stream.behaviorHints, sourceUrl),
-            ),
-            sourceSubtitles = stream.externalSubtitles,
+            subtitleRequests = if (previewed?.fromAddons == true) {
+                // The add-on results are saved below; nothing left to ask them.
+                emptyList()
+            } else {
+                addonSubtitleRequests(
+                    type = contentType,
+                    videoId = videoId,
+                    extras = previewed?.extras
+                        ?: subtitleRequestExtras(stream, if (p2pInfoHash != null) null else sourceUrl),
+                )
+            },
+            sourceSubtitles = if (previewed != null) {
+                filterSubtitlesByLanguages(previewed.subtitles, subtitleLanguages)
+            } else {
+                stream.externalSubtitles
+            },
+            downloadSubtitles = downloadSubtitles,
+            subtitleLanguages = subtitleLanguages,
+            p2pInfoHash = p2pInfoHash,
+            p2pFileIdx = if (p2pInfoHash != null) stream.p2pFileIdx else null,
+            p2pFilename = if (p2pInfoHash != null) stream.behaviorHints.filename else null,
+            p2pTrackers = if (p2pInfoHash != null) stream.p2pTrackers else emptyList(),
             localFileUri = null,
             fileName = fileName,
             status = DownloadStatus.Downloading,
@@ -229,12 +443,38 @@ object DownloadsRepository {
         }
     }
 
+    /**
+     * Called when the app goes to the background on Apple devices. Regular downloads are handed to
+     * the system, which keeps them going, so only torrent downloads (which need this app and its
+     * engine running) are paused. They resume automatically when the app comes back.
+     */
     fun pauseActiveDownloads() {
         ensureLoaded()
-        _uiState.value.items
-            .filter { it.status == DownloadStatus.Downloading }
+        val active = _uiState.value.items
+            .filter { it.status == DownloadStatus.Downloading && it.isP2p }
             .map { it.id }
-            .forEach(::pauseDownload)
+        pausedForBackground.addAll(active)
+        active.forEach(::pauseDownload)
+    }
+
+    private fun resumeDownloadsPausedForBackground() {
+        val ids = pausedForBackground.toList()
+        pausedForBackground.clear()
+        ids.forEach { id ->
+            // Skip anything the user paused, cancelled or finished in the meantime.
+            if (_uiState.value.items.firstOrNull { it.id == id }?.status == DownloadStatus.Paused) {
+                resumeDownload(id)
+            }
+        }
+    }
+
+    private fun observeAppForeground() {
+        if (foregroundJob != null) return
+        foregroundJob = p2pScope.launch {
+            AppForegroundMonitor.events().collect { visibility ->
+                if (visibility == AppVisibility.Foreground) resumeDownloadsPausedForBackground()
+            }
+        }
     }
 
     fun resumeDownload(downloadId: String) {
@@ -283,12 +523,27 @@ object DownloadsRepository {
     private fun loadFromDisk() {
         _hasUnseenCompleted.value = false
         hasLoaded = true
+        observeAppForeground()
+        // Leftovers of downloads that no longer exist (crash, forced quit, restart mid-cancel).
+        // Delayed and age-checked so a download started right now is never touched.
+        p2pScope.launch {
+            delay(ORPHAN_SWEEP_DELAY_MS)
+            DownloadsPlatformDownloader.removeOrphanedPartialFiles(
+                _uiState.value.items.mapTo(mutableSetOf()) { it.fileName },
+            )
+        }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
+            _selectedSubtitleLanguages.value = null
+            legacyDeselectedSubtitleLanguages = emptySet()
+            _offlineDownloadsHome.value = true
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
             return
         }
+        _selectedSubtitleLanguages.value = DownloadsCodec.decodeSelectedLanguages(payload)
+        legacyDeselectedSubtitleLanguages = DownloadsCodec.decodeDeselectedLanguages(payload)
+        _offlineDownloadsHome.value = DownloadsCodec.decodeOfflineDownloadsHome(payload)
 
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
@@ -312,24 +567,15 @@ object DownloadsRepository {
     }
 
     private fun startDownload(item: DownloadItem) {
+        if (item.isP2p && !P2pDownloadPlatform.runsInPlatformDownloader) {
+            startP2pDownload(item)
+            return
+        }
         val request = DownloadPlatformRequest(item)
 
         val handle = DownloadsPlatformDownloader.start(
             request = request,
-            onProgress = { downloadedBytes, totalBytes ->
-                mutateItem(item.id) { current ->
-                    if (current.status != DownloadStatus.Downloading) {
-                        current
-                    } else {
-                        current.copy(
-                            downloadedBytes = downloadedBytes.coerceAtLeast(0L),
-                            totalBytes = totalBytes?.takeIf { it > 0L },
-                            updatedAtEpochMs = DownloadsClock.nowEpochMs(),
-                            errorMessage = null,
-                        )
-                    }
-                }
-            },
+            onProgress = { downloadedBytes, totalBytes -> applyProgress(item.id, downloadedBytes, totalBytes) },
             onSuccess = { localFileUri, totalBytes ->
                 activeHandles.remove(item.id)
                 mutateItem(item.id) { current ->
@@ -374,7 +620,207 @@ object DownloadsRepository {
         activeHandles[item.id] = handle
     }
 
-    private fun mutateItem(downloadId: String, transform: (DownloadItem) -> DownloadItem) {
+    // ---- Torrent (P2P) downloads -------------------------------------------------------------
+    //
+    // The engine exposes each torrent file as a local HTTP stream. A torrent download starts that
+    // stream and copies it to a file with the regular platform downloader, so pause/resume (Range
+    // requests against the .part file), progress and file handling are shared with HTTP downloads.
+    //
+    // Disk use: while a stream is open the engine keeps the file's pieces in its cache, so a
+    // running torrent download needs about twice the file size. The free-space check below refuses
+    // to start when that does not fit, and the engine cache is reclaimed whenever the download
+    // stops (finished, paused, failed or cancelled), so the file is not stored twice afterwards.
+    // The .part file holds everything downloaded so far, so nothing is lost by reclaiming.
+
+    private fun startP2pDownload(item: DownloadItem) {
+        val handle = P2pDownloadHandle(item.id)
+        activeHandles[item.id] = handle
+        handle.job = p2pScope.launch {
+            try {
+                runP2pDownload(item, handle)
+            } finally {
+                if (activeHandles[item.id] === handle) activeHandles.remove(item.id)
+            }
+        }
+    }
+
+    private suspend fun runP2pDownload(item: DownloadItem, handle: P2pDownloadHandle) {
+        var slotHeld = false
+        var stream: P2pDownloadStream? = null
+        try {
+            val infoHash = item.p2pInfoHash
+            P2pSettingsRepository.ensureLoaded()
+            if (infoHash == null ||
+                !AppFeaturePolicy.p2pEnabled ||
+                !P2pDownloadPlatform.isSupported ||
+                !P2pSettingsRepository.uiState.value.p2pEnabled
+            ) {
+                markFailed(item.id, getString(Res.string.downloads_p2p_unavailable))
+                return
+            }
+
+            // Only a few torrents run at once; the rest wait here in the order they were started.
+            torrentSlots.acquire()
+            slotHeld = true
+
+            stream = try {
+                withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
+                    P2pStreamingEngine.openDownloadStream(
+                        P2pStreamRequest(
+                            infoHash = infoHash,
+                            fileIdx = item.p2pFileIdx,
+                            filename = item.p2pFilename,
+                            trackers = item.p2pTrackers,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                markFailed(
+                    item.id,
+                    error.message?.takeIf { it.isNotBlank() } ?: getString(Res.string.download_failed),
+                )
+                return
+            }
+            if (stream == null) {
+                markFailed(item.id, getString(Res.string.downloads_p2p_no_peers))
+                return
+            }
+            currentCoroutineContext().ensureActive()
+
+            val outcome = CompletableDeferred<P2pDownloadOutcome>()
+            var spaceChecked = false
+            val transfer = DownloadsPlatformDownloader.start(
+                request = DownloadPlatformRequest(
+                    item.copy(sourceUrl = stream.localUrl, sourceHeaders = emptyMap()),
+                ),
+                onProgress = { downloadedBytes, totalBytes ->
+                    if (totalBytes != null && totalBytes > 0L) {
+                        if (!spaceChecked) {
+                            spaceChecked = true
+                            val shortfall = TorrentDiskBudget.reserve(
+                                downloadId = item.id,
+                                totalBytes = totalBytes,
+                                downloadedBytes = downloadedBytes,
+                                freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
+                            )
+                            if (shortfall != null) {
+                                handle.stopping = true
+                                outcome.complete(
+                                    P2pDownloadOutcome.NotEnoughSpace(shortfall.neededBytes, shortfall.freeBytes),
+                                )
+                            }
+                        } else {
+                            TorrentDiskBudget.update(item.id, totalBytes, downloadedBytes)
+                        }
+                    }
+                    if (!handle.stopping) applyProgress(item.id, downloadedBytes, totalBytes)
+                },
+                onSuccess = { localFileUri, totalBytes ->
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Success(localFileUri, totalBytes))
+                },
+                onFailure = { message ->
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Failure(message))
+                },
+                onPaused = {
+                    handle.stopping = true
+                    outcome.complete(P2pDownloadOutcome.Paused)
+                },
+            )
+            handle.transfer = transfer
+            if (handle.stopping && !outcome.isCompleted) transfer.cancel()
+
+            when (val result = outcome.await()) {
+                is P2pDownloadOutcome.Success -> mutateItem(item.id) { current ->
+                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                    current.copy(
+                        status = DownloadStatus.Completed,
+                        localFileUri = result.localFileUri,
+                        downloadedBytes = result.totalBytes?.takeIf { it > 0L } ?: current.downloadedBytes,
+                        totalBytes = result.totalBytes?.takeIf { it > 0L } ?: current.totalBytes,
+                        errorMessage = null,
+                        updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                    )
+                }
+                is P2pDownloadOutcome.Failure -> markFailed(
+                    item.id,
+                    result.message.ifBlank { getString(Res.string.download_failed) },
+                )
+                is P2pDownloadOutcome.NotEnoughSpace -> {
+                    transfer.cancel()
+                    markFailed(
+                        item.id,
+                        getString(
+                            Res.string.downloads_p2p_not_enough_space,
+                            formatP2pMegabytes(result.neededBytes),
+                            formatP2pMegabytes(result.freeBytes),
+                        ),
+                    )
+                }
+                P2pDownloadOutcome.Paused -> mutateItem(item.id) { current ->
+                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                    current.copy(status = DownloadStatus.Paused, errorMessage = null)
+                }
+            }
+        } finally {
+            handle.stopping = true
+            withContext(NonCancellable) {
+                handle.transfer?.cancel()
+                // Gives the engine's cached copy of the file back; the .part file keeps what was
+                // downloaded, so a paused download resumes from there.
+                stream?.let { runCatching { P2pStreamingEngine.closeDownloadStream(it) } }
+                TorrentDiskBudget.release(item.id)
+                if (slotHeld) torrentSlots.release()
+            }
+        }
+    }
+
+    private fun markFailed(downloadId: String, message: String) {
+        mutateItem(downloadId) { current ->
+            if (current.status != DownloadStatus.Downloading) {
+                current
+            } else {
+                current.copy(
+                    status = DownloadStatus.Failed,
+                    errorMessage = message,
+                    updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Progress arrives several times a second. Publishing is cheap, but persisting re-encodes the
+     * whole list and rewrites the file, so progress is only persisted every few seconds. Status
+     * changes always persist immediately, and downloads resume from the partial file's real size,
+     * so a stale persisted byte count is harmless.
+     */
+    private fun applyProgress(downloadId: String, downloadedBytes: Long, totalBytes: Long?) {
+        val now = DownloadsClock.nowEpochMs()
+        val shouldPersist = now - lastProgressPersistEpochMs >= PROGRESS_PERSIST_INTERVAL_MS
+        if (shouldPersist) lastProgressPersistEpochMs = now
+        mutateItem(downloadId, persistChange = shouldPersist) { current ->
+            if (current.status != DownloadStatus.Downloading) {
+                current
+            } else {
+                current.copy(
+                    downloadedBytes = downloadedBytes.coerceAtLeast(0L),
+                    totalBytes = totalBytes?.takeIf { it > 0L },
+                    updatedAtEpochMs = now,
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    private fun mutateItem(
+        downloadId: String,
+        persistChange: Boolean = true,
+        transform: (DownloadItem) -> DownloadItem,
+    ) {
         var changed = false
         val updated = _uiState.value.items.map { item ->
             if (item.id == downloadId) {
@@ -387,7 +833,7 @@ object DownloadsRepository {
 
         if (changed) {
             publish(updated)
-            persist()
+            if (persistChange) persist()
         }
     }
 
@@ -417,7 +863,12 @@ object DownloadsRepository {
 
     private fun persist() {
         DownloadsStorage.savePayload(
-            DownloadsCodec.encodeItems(_uiState.value.items),
+            DownloadsCodec.encode(
+                _uiState.value.items,
+                _selectedSubtitleLanguages.value,
+                legacyDeselectedSubtitleLanguages,
+                _offlineDownloadsHome.value,
+            ),
         )
     }
 
@@ -451,9 +902,44 @@ object DownloadsRepository {
             ) != null
 }
 
+private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
+private const val ORPHAN_SWEEP_DELAY_MS = 20_000L
+private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
+// Computing the video hash reads a few blocks of the file; the subtitle lookup goes on without it.
+private const val SUBTITLE_HASH_TIMEOUT_MS = 3_000L
+private const val MAX_PREVIEWED_SUBTITLES = 8
+
+private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
+    var job: Job? = null
+    var transfer: DownloadsTaskHandle? = null
+
+    /** True once this download is ending (finished, failed, paused or cancelled). */
+    var stopping: Boolean = false
+
+    override fun cancel() {
+        stopping = true
+        // Cancel the coroutine first so a "cancelled" error from the aborted transfer is never
+        // reported as a failure.
+        job?.cancel()
+        transfer?.cancel()
+    }
+}
+
+private sealed interface P2pDownloadOutcome {
+    data class Success(val localFileUri: String, val totalBytes: Long?) : P2pDownloadOutcome
+    data class Failure(val message: String) : P2pDownloadOutcome
+    data class NotEnoughSpace(val neededBytes: Long, val freeBytes: Long) : P2pDownloadOutcome
+    data object Paused : P2pDownloadOutcome
+}
+
 @Serializable
 private data class StoredDownloadsPayload(
     val items: List<DownloadItem> = emptyList(),
+    // Legacy (older app versions): the UNticked languages. Only read as a fallback.
+    val deselectedSubtitleLanguages: List<String> = emptyList(),
+    // The ticked languages; null = never saved.
+    val subtitleLanguages: List<String>? = null,
+    val offlineDownloadsHome: Boolean = true,
 )
 
 private object DownloadsCodec {
@@ -467,13 +953,46 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).items
         }.getOrDefault(emptyList())
 
-    fun encodeItems(items: Collection<DownloadItem>): String =
+    fun decodeDeselectedLanguages(payload: String): Set<String> =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).deselectedSubtitleLanguages.toSet()
+        }.getOrDefault(emptySet())
+
+    fun decodeSelectedLanguages(payload: String): Set<String>? =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).subtitleLanguages?.toSet()
+        }.getOrNull()
+
+    fun decodeOfflineDownloadsHome(payload: String): Boolean =
+        runCatching {
+            json.decodeFromString<StoredDownloadsPayload>(payload).offlineDownloadsHome
+        }.getOrDefault(true)
+
+    fun encode(
+        items: Collection<DownloadItem>,
+        selectedSubtitleLanguages: Set<String>?,
+        legacyDeselectedSubtitleLanguages: Set<String>,
+        offlineDownloadsHome: Boolean,
+    ): String =
         json.encodeToString(
             StoredDownloadsPayload(
                 items = items.toList(),
+                deselectedSubtitleLanguages = legacyDeselectedSubtitleLanguages.toList().sorted(),
+                subtitleLanguages = selectedSubtitleLanguages?.toList()?.sorted(),
+                offlineDownloadsHome = offlineDownloadsHome,
             ),
         )
 }
+
+/** Saved languages are stored as the shared language key, so different spellings of one language match. */
+private fun canonicalSubtitleLanguage(language: String): String = downloadSubtitleLanguageKey(language)
+
+/** What [DownloadsRepository.previewSubtitleLanguages] found, kept until the download is queued. */
+private class PreviewedSubtitles(
+    val extras: SubtitleRequestExtras?,
+    val subtitles: List<StreamSubtitle>,
+    val fromAddons: Boolean,
+)
 
 private fun sanitizeRequestHeaders(headers: Map<String, String>?): Map<String, String> =
     headers
@@ -524,7 +1043,7 @@ private fun buildFileName(
     episodeNumber: Int?,
     episodeTitle: String?,
     fallbackTitle: String,
-    sourceUrl: String,
+    extension: String,
     downloadId: String,
 ): String {
     val baseTitle = if (seasonNumber != null && episodeNumber != null) {
@@ -543,7 +1062,6 @@ private fun buildFileName(
         title.ifBlank { fallbackTitle }
     }
 
-    val extension = sourceUrl.fileExtensionFromUrl()
     return buildString {
         append(baseTitle.sanitizeFileName().ifBlank { "download" }.take(92))
         append('_')
@@ -568,6 +1086,17 @@ private fun String.fileExtensionFromUrl(): String {
         "mp4"
     }
 }
+
+private fun String?.fileExtensionFromFileName(): String? {
+    val suffix = this?.substringAfterLast('.', missingDelimiterValue = "")
+        ?.lowercase()
+        ?.trim()
+        .orEmpty()
+    return suffix.takeIf { it.length in 2..5 && it.all(Char::isLetterOrDigit) }
+}
+
+private fun String.isHttpUrl(): Boolean =
+    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
 
 private fun String.isSupportedDownloadUrl(): Boolean {
     val normalized = trim().lowercase()

@@ -50,14 +50,18 @@ private const val DOWNLOAD_REQUEST_TIMEOUT_SECONDS = 60.0
 private const val DOWNLOAD_RESOURCE_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 private const val PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 private const val PROGRESS_MIN_BYTE_DELTA = 512L * 1024L
+private const val ORPHAN_MIN_AGE_SECONDS = 120.0
 
-private val backgroundSessionCompletionHandlers = mutableMapOf<String, () -> Unit>()
+internal val backgroundSessionCompletionHandlers = mutableMapOf<String, () -> Unit>()
 
 fun handleDownloadsBackgroundEvents(
     identifier: String,
     completionHandler: () -> Unit,
 ) {
     backgroundSessionCompletionHandlers[identifier] = completionHandler
+    // Re-creating the session with the same identifier reconnects it to its running and finished
+    // tasks and starts delivering their events to our delegate.
+    BackgroundDownloads.ensureSession()
 }
 
 fun pauseDownloadsForAppBackground() {
@@ -67,6 +71,21 @@ fun pauseDownloadsForAppBackground() {
 @OptIn(ExperimentalForeignApi::class)
 internal actual object DownloadsPlatformDownloader {
     actual fun start(
+        request: DownloadPlatformRequest,
+        onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+        onSuccess: (localFileUri: String, totalBytes: Long?) -> Unit,
+        onFailure: (message: String) -> Unit,
+        onPaused: () -> Unit,
+    ): DownloadsTaskHandle =
+        if (request.item.isP2p) {
+            // A torrent is copied from the P2P engine's local URL, which only exists while the
+            // app runs, so it cannot be handed to the system.
+            startInProcess(request, onProgress, onSuccess, onFailure, onPaused)
+        } else {
+            BackgroundDownloads.start(request, onProgress, onSuccess, onFailure)
+        }
+
+    private fun startInProcess(
         request: DownloadPlatformRequest,
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
         onSuccess: (localFileUri: String, totalBytes: Long?) -> Unit,
@@ -146,12 +165,32 @@ internal actual object DownloadsPlatformDownloader {
         return handle
     }
 
-    actual fun restoreItem(item: DownloadItem): DownloadItem =
-        if (item.status == DownloadStatus.Downloading) {
+    actual fun restoreItem(item: DownloadItem): DownloadItem {
+        if (item.status == DownloadStatus.Completed) return item
+
+        // The system keeps downloading while the app is closed and may have finished the file
+        // before the app saw it. A file at its final name is always complete (it is only moved
+        // there once fully downloaded).
+        val finalPath = "${downloadsDirectoryPath()}/${item.fileName}"
+        if (NSFileManager.defaultManager.fileExistsAtPath(finalPath)) {
+            val size = fileSizeOrNull(finalPath)
+            return item.copy(
+                status = DownloadStatus.Completed,
+                localFileUri = NSURL.fileURLWithPath(finalPath).absoluteString ?: "file://$finalPath",
+                downloadedBytes = size ?: item.downloadedBytes,
+                totalBytes = size ?: item.totalBytes,
+                errorMessage = null,
+            )
+        }
+
+        // Torrent downloads need the app (and its engine) to be running. Everything else is
+        // managed by the system and is picked up again when the app starts.
+        return if (item.status == DownloadStatus.Downloading && item.isP2p) {
             item.copy(status = DownloadStatus.Paused, errorMessage = null)
         } else {
             item
         }
+    }
 
     actual fun removeFile(localFileUri: String?): Boolean {
         if (localFileUri.isNullOrBlank()) return false
@@ -165,7 +204,9 @@ internal actual object DownloadsPlatformDownloader {
     }
 
     actual fun removePartialFile(destinationFileName: String): Boolean {
+        BackgroundDownloads.discard(destinationFileName)
         val destinationPath = "${downloadsDirectoryPath()}/$destinationFileName"
+        removePathIfExists("$destinationPath.resumedata")
         DownloadSubtitleStorage(NSURL.fileURLWithPath(destinationPath).absoluteString!!).remove()
         return removePathIfExists("$destinationPath.part")
     }
@@ -186,6 +227,32 @@ internal actual object DownloadsPlatformDownloader {
         } else {
             null
         }
+    }
+
+    actual fun removeOrphanedPartialFiles(knownFileNames: Set<String>) {
+        val manager = NSFileManager.defaultManager
+        val directory = downloadsDirectoryPath()
+        val names = manager.contentsOfDirectoryAtPath(directory, error = null)
+            ?.filterIsInstance<String>()
+            ?: return
+        val now = NSDate().timeIntervalSince1970
+        // Leftovers of a download that no longer exists: its partial file, its subtitle folder and
+        // saved resume data. Only touched once they have been idle for a while.
+        val suffixes = listOf(".part", ".subtitles", ".resumedata")
+        names
+            .filter { name ->
+                suffixes.any { suffix ->
+                    name.endsWith(suffix) && name.removeSuffix(suffix) !in knownFileNames
+                }
+            }
+            .forEach { name ->
+                val path = "$directory/$name"
+                val modified = (manager.attributesOfItemAtPath(path, error = null)
+                    ?.get("NSFileModificationDate") as? NSDate)
+                    ?.timeIntervalSince1970
+                    ?: return@forEach
+                if (now - modified > ORPHAN_MIN_AGE_SECONDS) removePathIfExists(path)
+            }
     }
 
     actual fun openDownloadsDirectory(): Boolean {
@@ -394,7 +461,7 @@ private fun NSURLResponse?.toDownloadResult(): IosDownloadResult {
 }
 
 @OptIn(ExperimentalForeignApi::class)
-private fun downloadsDirectoryPath(): String {
+internal fun downloadsDirectoryPath(): String {
     val root = NSHomeDirectory().trimEnd('/')
     val path = "$root/Documents/nuvio_downloads"
     NSFileManager.defaultManager.createDirectoryAtPath(
@@ -407,7 +474,7 @@ private fun downloadsDirectoryPath(): String {
 }
 
 @OptIn(ExperimentalForeignApi::class)
-private fun removePathIfExists(path: String): Boolean {
+internal fun removePathIfExists(path: String): Boolean {
     if (!NSFileManager.defaultManager.fileExistsAtPath(path)) return true
     return NSFileManager.defaultManager.removeItemAtPath(path, null)
 }
@@ -473,7 +540,7 @@ private suspend fun performDownloadRequest(
 }
 
 @OptIn(ExperimentalForeignApi::class)
-private fun fileSizeOrNull(path: String): Long? {
+internal fun fileSizeOrNull(path: String): Long? {
     val attrs = NSFileManager.defaultManager.attributesOfItemAtPath(path, error = null)
     val value = attrs?.get("NSFileSize")
     return when (value) {

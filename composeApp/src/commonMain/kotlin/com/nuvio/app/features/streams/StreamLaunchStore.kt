@@ -1,5 +1,14 @@
 package com.nuvio.app.features.streams
 
+/** An episode still to be downloaded after the one whose source is being picked. */
+data class SeasonBatchEpisode(
+    val videoId: String,
+    val season: Int,
+    val episode: Int,
+    val title: String?,
+    val thumbnail: String?,
+)
+
 data class StreamLaunch(
     val profileId: Int,
     val type: String,
@@ -19,6 +28,10 @@ data class StreamLaunch(
     val resumeProgressFraction: Float? = null,
     val manualSelection: Boolean = false,
     val startFromBeginning: Boolean = false,
+    // Opened from a "Download" menu action: picking a source downloads it instead of playing it.
+    val downloadOnly: Boolean = false,
+    // Set when a whole season is being downloaded: the episodes after this one.
+    val seasonBatch: List<SeasonBatchEpisode> = emptyList(),
 )
 
 object StreamLaunchStore {

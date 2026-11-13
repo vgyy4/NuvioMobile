@@ -20,6 +20,8 @@ internal object NuvioExoPlayerPerformanceHelper {
     private const val LOCAL_FILE_MIN_BUFFER_MS = 5_000
     private const val LOCAL_FILE_MAX_BUFFER_MS = 15_000
     private const val LOCAL_FILE_TARGET_BUFFER_MB = 48
+    private const val SMALL_HEAP_THRESHOLD_BYTES = 512L * 1024L * 1024L
+    private const val SMALL_HEAP_MAX_TARGET_BYTES = 100L * 1024L * 1024L
     private const val BACK_BUFFER_TARGET_SHARE_NUM = 1L
     private const val BACK_BUFFER_TARGET_SHARE_DEN = 2L
 
@@ -94,7 +96,7 @@ internal object NuvioExoPlayerPerformanceHelper {
             return buildCustomLoadControl(context, bufferSettings)
         }
         if (!enabled) {
-            return DefaultLoadControl.Builder()
+            val builder = DefaultLoadControl.Builder()
                 .setBackBuffer(PlaybackBufferSettings.DEFAULT_BACK_BUFFER_MS, true)
                 .setBufferDurationsMs(
                     DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
@@ -102,7 +104,11 @@ internal object NuvioExoPlayerPerformanceHelper {
                     DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
                     DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
                 )
-                .build()
+            smallHeapTargetBufferBytes()?.let { targetBytes ->
+                Log.i(TAG, "small heap load control targetBytes=$targetBytes")
+                builder.setTargetBufferBytes(targetBytes)
+            }
+            return builder.build()
         }
 
         val targetBufferMb = getSafeNativeMemoryLimitMb(context).coerceAtLeast(MIN_BUFFER_MB)
@@ -216,6 +222,17 @@ internal object NuvioExoPlayerPerformanceHelper {
             .setPrioritizeTimeOverSizeThresholds(false)
             .setBackBuffer(backBufferMs, true)
             .build()
+    }
+
+    /**
+     * Byte cap for the default (heap) load control on small-heap devices, where ExoPlayer's own
+     * default target (derived from the track types) can exceed what the heap can hold. Returns
+     * null on large-heap devices so their behaviour is unchanged.
+     */
+    private fun smallHeapTargetBufferBytes(): Int? {
+        val maxHeapBytes = Runtime.getRuntime().maxMemory()
+        if (maxHeapBytes <= 0L || maxHeapBytes >= SMALL_HEAP_THRESHOLD_BYTES) return null
+        return minOf(SMALL_HEAP_MAX_TARGET_BYTES, maxHeapBytes / 4L).toInt()
     }
 
     private fun effectiveBackBufferMs(backBufferMs: Int, minBufferMs: Int): Int {

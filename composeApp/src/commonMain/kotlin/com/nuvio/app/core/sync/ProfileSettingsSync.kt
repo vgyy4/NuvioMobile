@@ -7,6 +7,7 @@ import com.nuvio.app.core.network.SupabaseProvider
 import com.nuvio.app.features.collection.CollectionMobileSettingsRepository
 import com.nuvio.app.features.collection.CollectionMobileSettingsStorage
 import com.nuvio.app.features.debrid.DebridSettingsRepository
+import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.debrid.DebridSettingsStorage
 import com.nuvio.app.features.details.MetaScreenSettingsStorage
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
@@ -194,6 +195,8 @@ object ProfileSettingsSync {
             CardDepthStyleRepository.uiState.map { "card_depth_style" },
             PlayerSettingsRepository.uiState.map { "player" },
             StreamBadgeSettingsRepository.uiState.map { "stream_badges" },
+            DownloadsRepository.selectedSubtitleLanguages.map { "download_subtitle_languages" },
+            DownloadsRepository.offlineDownloadsHome.map { "download_offline_home" },
             DebridSettingsRepository.uiState.map { "debrid" },
             TmdbSettingsRepository.uiState.map { "tmdb" },
             MdbListSettingsRepository.uiState.map { "mdblist" },
@@ -250,6 +253,9 @@ object ProfileSettingsSync {
                     PlayerSettingsStorage.exportToSyncPayload(),
                 ),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
+                // Only the ticked languages are written; the legacy "deselected" field is left to older versions.
+                downloadSubtitleLanguages = DownloadsRepository.selectedSubtitleLanguages.value?.toList()?.sorted(),
+                downloadOfflineHome = DownloadsRepository.offlineDownloadsHome.value,
                 debridSettings = withoutProfileCredentials(
                     PROFILE_DEBRID_SETTINGS_FEATURE,
                     DebridSettingsStorage.exportToSyncPayload(),
@@ -308,6 +314,14 @@ object ProfileSettingsSync {
         StreamBadgeSettingsStorage.replaceFromSyncPayload(blob.features.streamBadgeSettings)
         StreamBadgeSettingsRepository.onProfileChanged()
 
+        // Absent in blobs written by older versions: keep the local choice then. Blobs from older
+        // versions only carry the legacy list of unticked languages, used as a fallback.
+        DownloadsRepository.replaceSelectedSubtitleLanguages(
+            languages = blob.features.downloadSubtitleLanguages,
+            legacyDeselected = blob.features.downloadSubtitleDeselectedLanguages,
+        )
+        blob.features.downloadOfflineHome?.let(DownloadsRepository::setOfflineDownloadsHome)
+
         DebridSettingsStorage.replaceFromSyncPayload(
             preservingLocalProfileCredentials(
                 PROFILE_DEBRID_SETTINGS_FEATURE,
@@ -361,6 +375,7 @@ object ProfileSettingsSync {
         CardDepthStyleRepository.ensureLoaded()
         PlayerSettingsRepository.ensureLoaded()
         StreamBadgeSettingsRepository.ensureLoaded()
+        DownloadsRepository.ensureLoaded()
         DebridSettingsRepository.ensureLoaded()
         TmdbSettingsRepository.ensureLoaded()
         MdbListSettingsRepository.ensureLoaded()
@@ -394,6 +409,11 @@ private data class MobileProfileSettingsFeatures(
     @SerialName("card_depth_style_settings_payload") val cardDepthStyleSettingsPayload: String = "",
     @SerialName("player_settings") val playerSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("stream_badge_settings") val streamBadgeSettings: JsonObject = JsonObject(emptyMap()),
+    // Ticked download subtitle languages (null = nothing saved yet).
+    @SerialName("download_subtitle_languages") val downloadSubtitleLanguages: List<String>? = null,
+    // Legacy: unticked languages written by older versions. Read-only fallback.
+    @SerialName("download_subtitle_deselected_languages") val downloadSubtitleDeselectedLanguages: List<String>? = null,
+    @SerialName("download_offline_home") val downloadOfflineHome: Boolean? = null,
     @SerialName("debrid_settings") val debridSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("tmdb_settings") val tmdbSettings: JsonObject = JsonObject(emptyMap()),
     @SerialName("mdblist_settings") val mdbListSettings: JsonObject = JsonObject(emptyMap()),

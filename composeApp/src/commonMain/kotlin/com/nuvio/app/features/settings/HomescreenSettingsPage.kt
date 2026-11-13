@@ -1,5 +1,7 @@
 package com.nuvio.app.features.settings
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nuvio.app.features.downloads.DownloadsRepository
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.clickable
@@ -61,6 +63,8 @@ import nuvio.composeapp.generated.resources.settings_homescreen_section_collecti
 import nuvio.composeapp.generated.resources.settings_homescreen_section_hero
 import nuvio.composeapp.generated.resources.settings_homescreen_section_hero_sources
 import nuvio.composeapp.generated.resources.settings_homescreen_selected_count
+import nuvio.composeapp.generated.resources.settings_homescreen_offline_downloads
+import nuvio.composeapp.generated.resources.settings_homescreen_offline_downloads_description
 import nuvio.composeapp.generated.resources.settings_homescreen_show_hero
 import nuvio.composeapp.generated.resources.settings_homescreen_show_hero_description
 import nuvio.composeapp.generated.resources.settings_homescreen_summary
@@ -117,6 +121,18 @@ internal fun LazyListScope.homescreenSettingsContent(
                     checked = hideUnreleasedContent,
                     isTablet = isTablet,
                     onCheckedChange = HomeCatalogSettingsRepository::setHideUnreleasedContent,
+                )
+                SettingsGroupDivider(isTablet = isTablet)
+                val offlineDownloadsHome by remember {
+                    DownloadsRepository.ensureLoaded()
+                    DownloadsRepository.offlineDownloadsHome
+                }.collectAsStateWithLifecycle()
+                SettingsSwitchRow(
+                    title = stringResource(Res.string.settings_homescreen_offline_downloads),
+                    description = stringResource(Res.string.settings_homescreen_offline_downloads_description),
+                    checked = offlineDownloadsHome,
+                    isTablet = isTablet,
+                    onCheckedChange = DownloadsRepository::setOfflineDownloadsHome,
                 )
             }
         }

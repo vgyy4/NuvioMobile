@@ -31,8 +31,9 @@ import com.nuvio.app.features.autosync.AutoSyncMpvEngineController
 import com.nuvio.app.features.autosync.IosAutoSyncMpvPlatform
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import nuvio.composeapp.generated.resources.Res
@@ -42,6 +43,10 @@ import org.jetbrains.compose.resources.getString
 import org.jetbrains.compose.resources.stringResource
 
 private const val TAG = "NuvioiOSPlayer"
+private const val IOS_PLAYING_POLL_INTERVAL_MS = 250L
+private const val IOS_IDLE_POLL_INTERVAL_MS = 1_000L
+// Keep polling at the playing rate for ~2 s after a command or a state change.
+private const val IOS_FAST_POLLS_AFTER_WAKE = 8
 
 @OptIn(ExperimentalForeignApi::class)
 @Composable
@@ -87,6 +92,9 @@ actual fun PlatformPlayerSurface(
         return
     }
 
+    // Wakes the snapshot poll loop out of its slow paused/loading wait after a command.
+    val pollWake = remember(bridge) { Channel<Unit>(Channel.CONFLATED) }
+
     val controller = remember(bridge) {
         object : PlayerEngineController, PlayerSystemControlSource {
             override val keepsPlaybackInBackground: Boolean
@@ -98,22 +106,27 @@ actual fun PlatformPlayerSurface(
 
             override fun play() {
                 bridge.play()
+                pollWake.trySend(Unit)
             }
 
             override fun pause() {
                 bridge.pause()
+                pollWake.trySend(Unit)
             }
 
             override fun seekTo(positionMs: Long) {
                 bridge.seekTo(positionMs)
+                pollWake.trySend(Unit)
             }
 
             override fun seekBy(offsetMs: Long) {
                 bridge.seekBy(offsetMs)
+                pollWake.trySend(Unit)
             }
 
             override fun retry() {
                 bridge.retry()
+                pollWake.trySend(Unit)
             }
 
             override fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {
@@ -142,15 +155,25 @@ actual fun PlatformPlayerSurface(
 
             override fun setPlaybackSpeed(speed: Float) {
                 bridge.setPlaybackSpeed(speed)
+                pollWake.trySend(Unit)
             }
 
             override fun setMuted(muted: Boolean) {
                 bridge.setMuted(muted)
             }
 
+            // The revision is read before the tracks so a refresh racing with the rebuild only
+            // costs one extra rebuild on the next call.
+            private var cachedAudioTracksRevision = -1
+            private var cachedAudioTracks: List<AudioTrack> = emptyList()
+            private var cachedSubtitleTracksRevision = -1
+            private var cachedSubtitleTracks: List<SubtitleTrack> = emptyList()
+
             override fun getAudioTracks(): List<AudioTrack> {
+                val revision = bridge.getTrackRevision()
+                if (revision == cachedAudioTracksRevision) return cachedAudioTracks
                 val count = bridge.getAudioTrackCount()
-                return (0 until count).map { i ->
+                val tracks = (0 until count).map { i ->
                     AudioTrack(
                         index = bridge.getAudioTrackIndex(i),
                         id = bridge.getAudioTrackId(i),
@@ -159,9 +182,14 @@ actual fun PlatformPlayerSurface(
                         isSelected = bridge.isAudioTrackSelected(i),
                     )
                 }
+                cachedAudioTracks = tracks
+                cachedAudioTracksRevision = revision
+                return tracks
             }
 
             override fun getSubtitleTracks(): List<SubtitleTrack> {
+                val revision = bridge.getTrackRevision()
+                if (revision == cachedSubtitleTracksRevision) return cachedSubtitleTracks
                 val count = bridge.getSubtitleTrackCount()
                 val tracks = (0 until count).map { i ->
                     val trackId = bridge.getSubtitleTrackId(i)
@@ -181,6 +209,8 @@ actual fun PlatformPlayerSurface(
                     )
                 }
                 Logger.d(TAG) { "getSubtitleTracks: found ${tracks.size} tracks" }
+                cachedSubtitleTracks = tracks
+                cachedSubtitleTracksRevision = revision
                 return tracks
             }
 
@@ -333,9 +363,16 @@ actual fun PlatformPlayerSurface(
         latestOnControllerReady.value(autoSyncController)
     }
 
+    // The output settings are applied before each load; the settings effect below only re-applies
+    // when one of the output settings differs from what was last applied.
+    val videoOutputKey = playerSettings.iosVideoOutputKey()
+    val appliedVideoOutputKey = remember(bridge) { arrayOfNulls<List<Any>>(1) }
+
     // Load file and set initial state
     LaunchedEffect(bridge, sourceUrl, sourceAudioUrl, sourceHeaders, externalSubtitles) {
-        bridge.applyIosVideoOutputSettings(latestPlayerSettings.value)
+        val settings = latestPlayerSettings.value
+        bridge.applyIosVideoOutputSettings(settings)
+        appliedVideoOutputKey[0] = settings.iosVideoOutputKey()
         bridge.loadFileWithAudio(
             videoUrl = sourceUrl,
             audioUrl = sourceAudioUrl,
@@ -347,11 +384,21 @@ actual fun PlatformPlayerSurface(
         } else {
             bridge.pause()
         }
+        pollWake.trySend(Unit)
     }
 
     // Update playWhenReady
     LaunchedEffect(bridge, playWhenReady) {
         if (playWhenReady) bridge.play() else bridge.pause()
+        pollWake.trySend(Unit)
+    }
+
+    // Re-apply only when a video/audio output setting changed, not on every player setting change.
+    LaunchedEffect(bridge, videoOutputKey) {
+        if (appliedVideoOutputKey[0] != videoOutputKey) {
+            bridge.applyIosVideoOutputSettings(playerSettings)
+            appliedVideoOutputKey[0] = videoOutputKey
+        }
     }
 
     // Update resize mode
@@ -365,13 +412,12 @@ actual fun PlatformPlayerSurface(
         )
     }
 
-    LaunchedEffect(bridge, playerSettings) {
-        bridge.applyIosVideoOutputSettings(playerSettings)
-    }
-
     // Polling for snapshots
     LaunchedEffect(bridge) {
         var lastReportedError: String? = null
+        var lastPlaying: Boolean? = null
+        var lastLoading: Boolean? = null
+        var fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
         while (isActive) {
             val snapshot = PlayerPlaybackSnapshot(
                 isLoading = bridge.getIsLoading(),
@@ -388,7 +434,19 @@ actual fun PlatformPlayerSurface(
                 lastReportedError = errorMessage
                 latestOnError.value(errorMessage)
             }
-            delay(250L)
+            // Poll at ~4 Hz while playing; once paused/loading settles, drop to ~1 Hz. A command
+            // (play, seek, ...) or a play/loading state change re-arms the fast rate immediately.
+            if (snapshot.isPlaying != lastPlaying || snapshot.isLoading != lastLoading) {
+                fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
+            }
+            lastPlaying = snapshot.isPlaying
+            lastLoading = snapshot.isLoading
+            val fast = (snapshot.isPlaying && !snapshot.isLoading) || fastPollsRemaining > 0
+            if (fastPollsRemaining > 0) fastPollsRemaining--
+            val interval = if (fast) IOS_PLAYING_POLL_INTERVAL_MS else IOS_IDLE_POLL_INTERVAL_MS
+            if (withTimeoutOrNull(interval) { pollWake.receive() } != null) {
+                fastPollsRemaining = IOS_FAST_POLLS_AFTER_WAKE
+            }
         }
     }
 
@@ -458,6 +516,23 @@ actual fun PlatformPlayerSurface(
         }
     }
 }
+
+private fun PlayerSettingsUiState.iosVideoOutputKey(): List<Any> = listOf(
+    iosAudioOutputMode,
+    iosHardwareDecoderMode,
+    iosTargetColorspaceHintEnabled,
+    iosToneMappingMode,
+    iosHdrComputePeakEnabled,
+    iosTargetPrimaries,
+    iosTargetTransfer,
+    iosExtendedDynamicRangeEnabled,
+    iosDebandEnabled,
+    iosInterpolationEnabled,
+    iosBrightness,
+    iosContrast,
+    iosSaturation,
+    iosGamma,
+)
 
 private fun NuvioPlayerBridge.applyIosVideoOutputSettings(settings: PlayerSettingsUiState) {
     configureAudioOutput(audioOutput = settings.iosAudioOutputMode.mpvValue)
