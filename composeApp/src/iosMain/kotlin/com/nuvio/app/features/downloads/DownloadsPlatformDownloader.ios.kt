@@ -68,9 +68,6 @@ fun pauseDownloadsForAppBackground() {
     DownloadsRepository.pauseActiveDownloads()
 }
 
-/** Whether a torrent download is running right now (they need this app and its engine to stay alive). */
-fun hasActiveP2pDownloads(): Boolean = DownloadsRepository.hasActiveP2pDownloads()
-
 @OptIn(ExperimentalForeignApi::class)
 internal actual object DownloadsPlatformDownloader {
     actual fun start(
