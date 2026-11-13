@@ -114,40 +114,32 @@ internal fun MainTabsDestination(
         val showBottomFloatingBar =
             !useNativeBottomTabs && (!isTabletLayout || bottomBarOnTablet) && navBarStyleSetting != NavBarStyle.CLASSIC
         val navBarGlowEnabled by ThemeSettingsRepository.navBarGlowEnabled.collectAsStateWithLifecycle()
-        // Compact <-> expanded trigger of the iOS Compose shell bar: it collapses while scrolling down,
-        // and expands when scrolling up, when the content is back at its start, and on every tab
-        // selection (including re-selecting the current tab).
+        // Compact <-> expanded trigger of the iOS Compose shell bar: it collapses while scrolling
+        // down and expands when scrolling up or when the content is back at its start. Selecting a
+        // tab leaves the bar as it is (a compact bar stays compact, an expanded one stays expanded).
         SideEffect { navBarScrollState.expandsAtTop = iosComposeShell }
-        val expandOnTabChange = iosComposeShell && navBarStyleSetting == NavBarStyle.ADAPTIVE
-        val selectTab: (AppScreenTab) -> Unit = { tab ->
-            if (expandOnTabChange) navBarScrollState.expand()
-            onTabSelected(tab)
-        }
-        LaunchedEffect(selectedTab, expandOnTabChange) {
-            if (expandOnTabChange) navBarScrollState.expand()
-        }
         val floatingNavigationItems = listOf(
             FloatingNavigationItem(
                 selected = selectedTab == AppScreenTab.Home,
-                onClick = { selectTab(AppScreenTab.Home) },
+                onClick = { onTabSelected(AppScreenTab.Home) },
                 icon = Icons.Filled.Home,
                 label = stringResource(Res.string.compose_nav_home),
             ),
             FloatingNavigationItem(
                 selected = selectedTab == AppScreenTab.Search,
-                onClick = { selectTab(AppScreenTab.Search) },
+                onClick = { onTabSelected(AppScreenTab.Search) },
                 drawable = Res.drawable.sidebar_search,
                 label = stringResource(Res.string.compose_nav_search),
             ),
             FloatingNavigationItem(
                 selected = selectedTab == AppScreenTab.Library,
-                onClick = { selectTab(AppScreenTab.Library) },
+                onClick = { onTabSelected(AppScreenTab.Library) },
                 drawable = Res.drawable.sidebar_library,
                 label = stringResource(Res.string.compose_nav_library),
             ),
             FloatingNavigationItem(
                 selected = selectedTab == AppScreenTab.Settings,
-                onClick = { selectTab(AppScreenTab.Settings) },
+                onClick = { onTabSelected(AppScreenTab.Settings) },
                 label = stringResource(Res.string.compose_nav_profile),
                 content = { onClick ->
                     ProfileSwitcherTab(
