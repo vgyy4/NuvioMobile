@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.ui.LocalNuvioBottomNavigationOverlayPadding
+import com.nuvio.app.core.ui.LocalNuvioGlassNavigationBar
 import com.nuvio.app.core.ui.LocalNuvioNavBarScrollState
 import com.nuvio.app.core.ui.NuvioNavBarScrollState
 import com.nuvio.app.core.ui.NuvioClassicNavigationBar
@@ -232,13 +233,15 @@ internal fun MainTabsDestination(
                         enter = fadeIn(tween(160)) + slideInVertically(tween(220)) { it / 2 },
                         exit = fadeOut(tween(120)) + slideOutVertically(tween(160)) { it / 2 },
                     ) {
-                        FloatingNavigationBar(
-                            modifier = if (bottomBarOnTablet) Modifier.widthIn(max = 416.dp) else Modifier,
-                            scrollState = navBarScrollState,
-                            hazeState = navBarHazeState,
-                            items = floatingNavigationItems,
-                            glowEnabled = navBarGlowEnabled,
-                        )
+                        CompositionLocalProvider(LocalNuvioGlassNavigationBar provides iosComposeShell) {
+                            FloatingNavigationBar(
+                                modifier = if (bottomBarOnTablet) Modifier.widthIn(max = 416.dp) else Modifier,
+                                scrollState = navBarScrollState,
+                                hazeState = navBarHazeState,
+                                items = floatingNavigationItems,
+                                glowEnabled = navBarGlowEnabled,
+                            )
+                        }
                     }
                 }
             }

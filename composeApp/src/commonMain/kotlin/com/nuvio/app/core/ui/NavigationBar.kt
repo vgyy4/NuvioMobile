@@ -34,16 +34,24 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -56,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.offset
+import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import kotlinx.coroutines.CoroutineScope
@@ -125,6 +134,73 @@ fun rememberNuvioNavBarScrollState(): NuvioNavBarScrollState {
 }
 
 /**
+ * True when the bar should imitate the iOS 26 Liquid Glass tab bar (Compose shell on iOS, where the
+ * system bar is not available). Provided by the main tabs destination.
+ */
+internal val LocalNuvioGlassNavigationBar = staticCompositionLocalOf { false }
+
+private val GlassBaseColor = Color(0xFF1C1C1E)
+
+/**
+ * Soft drop shadow of the system bar: stacked translucent rounded rects drawn only outside the
+ * pill outline (so the translucent glass is not darkened from behind). Draw phase only.
+ */
+private fun Modifier.glassBarShadow(): Modifier = drawBehind {
+    val outline = Path().apply {
+        addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(size.height / 2f)))
+    }
+    val offsetY = 6.dp.toPx()
+    clipPath(outline, ClipOp.Difference) {
+        for (layer in 1..8) {
+            val spread = layer * 2.dp.toPx()
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.03f),
+                topLeft = Offset(-spread, -spread + offsetY),
+                size = Size(size.width + 2f * spread, size.height + 2f * spread),
+                cornerRadius = CornerRadius(size.height / 2f + spread),
+            )
+        }
+    }
+}
+
+/**
+ * Specular edge of the glass: a lit rim (bright at the top-left and, fainter, at the bottom-right),
+ * a soft top gloss and a small highlight near the top-left corner. Cached per size.
+ */
+private fun Modifier.glassBarHighlights(): Modifier = drawWithCache {
+    val rimWidth = 1.dp.toPx()
+    val rim = Brush.linearGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.55f),
+            Color.White.copy(alpha = 0.07f),
+            Color.White.copy(alpha = 0.05f),
+            Color.White.copy(alpha = 0.28f),
+        ),
+        start = Offset.Zero,
+        end = Offset(size.width, size.height),
+    )
+    val gloss = Brush.verticalGradient(
+        listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.02f), Color.Transparent),
+    )
+    val corner = Brush.radialGradient(
+        colors = listOf(Color.White.copy(alpha = 0.14f), Color.Transparent),
+        center = Offset(size.height * 0.7f, 0f),
+        radius = size.height * 1.5f,
+    )
+    onDrawBehind {
+        drawRect(gloss)
+        drawRect(corner)
+        drawRoundRect(
+            brush = rim,
+            topLeft = Offset(rimWidth / 2f, rimWidth / 2f),
+            size = Size(size.width - rimWidth, size.height - rimWidth),
+            cornerRadius = CornerRadius((size.height - rimWidth) / 2f),
+            style = Stroke(rimWidth),
+        )
+    }
+}
+
+/**
  * Floating pill-shaped navigation bar with scroll-responsive labels.
  *
  * @param hazeState Optional [HazeState] whose source is placed on the content behind this bar.
@@ -147,6 +223,11 @@ fun NuvioNavigationBar(
         ),
         label = "nav_label_alpha",
     )
+
+    val glass = LocalNuvioGlassNavigationBar.current
+    // The blur input is shrunk before blurring; a quarter-resolution input is indistinguishable
+    // behind a ~30 dp blur and much cheaper on old GPUs (iPad Air 2).
+    val blurInputScale = if (DevicePerformance.isLowEnd) HazeInputScale.Fixed(0.25f) else HazeInputScale.Auto
 
     val scope = rememberCoroutineScope()
     val pillState = remember { NavPillState(scope) }
@@ -179,19 +260,35 @@ fun NuvioNavigationBar(
                 }
             }
             .fillMaxWidth()
+            .then(if (glass) Modifier.glassBarShadow() else Modifier)
             .clip(RoundedCornerShape(NuvioTokens.Radius.full))
             .then(
                 if (hazeState != null) {
                     Modifier.hazeEffect(state = hazeState) {
-                        blurRadius = 24.dp
+                        blurRadius = if (glass) 30.dp else 24.dp
+                        if (glass) {
+                            inputScale = blurInputScale
+                            noiseFactor = 0f
+                        }
                     }
                 } else {
                     Modifier
                 },
             )
-            .background(Color(0xFF1C1C1E).copy(alpha = if (hazeState != null) 0.55f else 0.82f))
+            .background(
+                GlassBaseColor.copy(
+                    alpha = when {
+                        hazeState == null -> 0.82f
+                        glass -> 0.42f
+                        else -> 0.55f
+                    },
+                ),
+            )
 
         Box(modifier = pillModifier) {
+            if (glass) {
+                Box(modifier = Modifier.matchParentSize().glassBarHighlights())
+            }
             // Padded content box shared by the sliding selection pill and the item row, so both use
             // the same coordinate origin (item bounds are measured relative to the row).
             Box(
@@ -208,7 +305,7 @@ fun NuvioNavigationBar(
                     modifier = Modifier
                         .matchParentSize()
                         .graphicsLayer()
-                        .drawBehind { with(pillState) { drawSelectionPill(selectedPillColor) } },
+                        .drawBehind { with(pillState) { drawSelectionPill(selectedPillColor, glass) } },
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -311,7 +408,7 @@ private class NavPillState(private val scope: CoroutineScope) {
         }
     }
 
-    fun DrawScope.drawSelectionPill(color: Color) {
+    fun DrawScope.drawSelectionPill(color: Color, glass: Boolean) {
         // Always read so the draw layer is observing both, whatever state the pill is in.
         layoutTick
         val t = progress.value
@@ -329,6 +426,10 @@ private class NavPillState(private val scope: CoroutineScope) {
         }
         if (width <= 0f || height <= 0f) return
         val radius = min(width, height) / 2f
+        if (glass) {
+            drawGlassSelectionPill(left, top, width, height)
+            return
+        }
         drawRoundRect(
             color = color,
             topLeft = Offset(left, top),
@@ -336,6 +437,43 @@ private class NavPillState(private val scope: CoroutineScope) {
             cornerRadius = CornerRadius(radius, radius),
         )
     }
+}
+
+/** The lighter glass capsule behind the selected tab: pale fill, top gloss and a lit rim. */
+private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Float, height: Float) {
+    val radius = min(width, height) / 2f
+    drawRoundRect(
+        color = Color.White.copy(alpha = 0.14f),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = CornerRadius(radius, radius),
+    )
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(Color.White.copy(alpha = 0.16f), Color.Transparent),
+            startY = top,
+            endY = top + height,
+        ),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = CornerRadius(radius, radius),
+    )
+    val rimWidth = 0.75.dp.toPx()
+    drawRoundRect(
+        brush = Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.50f),
+                Color.White.copy(alpha = 0.06f),
+                Color.White.copy(alpha = 0.24f),
+            ),
+            start = Offset(left, top),
+            end = Offset(left + width, top + height),
+        ),
+        topLeft = Offset(left + rimWidth / 2f, top + rimWidth / 2f),
+        size = Size(width - rimWidth, height - rimWidth),
+        cornerRadius = CornerRadius(radius - rimWidth / 2f),
+        style = Stroke(rimWidth),
+    )
 }
 
 interface NuvioNavigationBarScope {
