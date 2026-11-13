@@ -5,7 +5,7 @@ import com.nuvio.app.core.ui.NuvioStatusModal
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
 
-internal enum class DeleteDownloadsKind { Episode, Movie, Season, Show }
+internal enum class DeleteDownloadsKind { Episode, Movie, Season, Show, Watched }
 
 /** What the user asked to delete from a context menu, shown for confirmation first. */
 internal class DeleteDownloadsRequest(
@@ -24,12 +24,15 @@ internal fun DeleteDownloadsHost(request: DeleteDownloadsRequest?, onDismiss: ()
                 DeleteDownloadsKind.Movie -> Res.string.delete_download_movie_title
                 DeleteDownloadsKind.Season -> Res.string.delete_download_season_title
                 DeleteDownloadsKind.Show -> Res.string.delete_download_show_title
+                DeleteDownloadsKind.Watched -> Res.string.delete_download_watched_title
             },
         ),
-        message = if (request.kind == DeleteDownloadsKind.Season || request.kind == DeleteDownloadsKind.Show) {
-            stringResource(Res.string.delete_download_season_message, request.downloadIds.size)
-        } else {
-            stringResource(Res.string.delete_download_message)
+        message = when (request.kind) {
+            DeleteDownloadsKind.Season, DeleteDownloadsKind.Show ->
+                stringResource(Res.string.delete_download_season_message, request.downloadIds.size)
+            DeleteDownloadsKind.Watched ->
+                stringResource(Res.string.delete_download_watched_message, request.downloadIds.size)
+            else -> stringResource(Res.string.delete_download_message)
         },
         isVisible = true,
         destructive = true,
@@ -50,5 +53,6 @@ internal fun deleteDownloadLabel(kind: DeleteDownloadsKind): String = stringReso
         DeleteDownloadsKind.Movie -> Res.string.delete_download_movie
         DeleteDownloadsKind.Season -> Res.string.delete_download_season
         DeleteDownloadsKind.Show -> Res.string.delete_download_show
+        DeleteDownloadsKind.Watched -> Res.string.delete_download_watched
     },
 )
