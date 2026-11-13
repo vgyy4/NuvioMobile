@@ -931,6 +931,9 @@ object DownloadsRepository {
         active.forEach(::pauseDownload)
     }
 
+    /** A torrent download is being transferred by this app right now, in any profile. */
+    fun hasActiveP2pDownloads(): Boolean = activeHandles.values.any { it is P2pDownloadHandle }
+
     private fun resumeDownloadsPausedForBackground() {
         val ids = pausedForBackground.toList()
         pausedForBackground.clear()
