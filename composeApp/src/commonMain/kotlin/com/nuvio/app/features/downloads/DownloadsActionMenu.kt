@@ -68,6 +68,7 @@ internal fun DownloadsActionOverlay(
     onOpenDetails: ((type: String, id: String, title: String) -> Unit)?,
     onDelete: (DeleteDownloadsRequest) -> Unit,
     onDismissed: () -> Unit,
+    blurUnwatchedEpisodes: Boolean = false,
 ) {
     when (target) {
         is DownloadsMenuTarget.ContinueWatching -> ContinueWatchingMenu(
@@ -102,6 +103,7 @@ internal fun DownloadsActionOverlay(
             hazeState = hazeState,
             isOnline = isOnline,
             watchedKeys = watchedKeys,
+            blurUnwatchedEpisodes = blurUnwatchedEpisodes,
             onPlay = onPlay,
             onOpenDetails = onOpenDetails,
             onDelete = onDelete,
@@ -241,6 +243,7 @@ private fun EpisodeMenu(
     hazeState: HazeState,
     isOnline: Boolean,
     watchedKeys: Set<String>,
+    blurUnwatchedEpisodes: Boolean,
     onPlay: (DownloadItem) -> Unit,
     onOpenDetails: ((type: String, id: String, title: String) -> Unit)?,
     onDelete: (DeleteDownloadsRequest) -> Unit,
@@ -268,6 +271,7 @@ private fun EpisodeMenu(
         title = item.episodeTitle?.trim()?.takeIf { it.isNotBlank() } ?: item.title,
         subtitle = localizedSeasonEpisodeCode(item.seasonNumber, item.episodeNumber) ?: item.title,
         isWatched = isWatched,
+        blurred = blurUnwatchedEpisodes && !isWatched,
         depthSurface = NuvioCardDepthSurface.EpisodeCards,
         anchor = anchor,
         actions = buildList {

@@ -2,6 +2,7 @@ package com.nuvio.app.features.downloads
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,7 +47,11 @@ import com.nuvio.app.core.ui.NuvioStatusModal
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.PosterZoomAnchor
 import com.nuvio.app.core.ui.PosterZoomAnchorHolder
-import com.nuvio.app.core.ui.posterCardClickable
+import com.nuvio.app.features.details.MetaDetails
+import com.nuvio.app.features.details.MetaEpisodeCardStyle
+import com.nuvio.app.features.details.MetaScreenSettingsRepository
+import com.nuvio.app.features.details.MetaVideo
+import com.nuvio.app.features.details.components.DetailSeriesContent
 import com.nuvio.app.features.home.components.HomeContinueWatchingSection
 import com.nuvio.app.features.home.components.HomeContinueWatchingSectionBottomPadding
 import com.nuvio.app.features.home.rememberCachedHomeContinueWatchingItems
@@ -56,6 +61,7 @@ import com.nuvio.app.features.watched.watchedItemKeys
 import com.nuvio.app.features.watchprogress.ContinueWatchingItem
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesUiState
+import com.nuvio.app.features.watchprogress.WatchProgressEntry
 import com.nuvio.app.features.watchprogress.WatchProgressRepository
 import com.nuvio.app.features.watchprogress.continueWatchingItemKey
 import dev.chrisbanes.haze.hazeSource
@@ -97,6 +103,11 @@ fun DownloadsScreen(
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
     val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
+    // The episode card style and the blur/ratings options are the ones of the Meta screen settings.
+    val metaScreenSettings by remember {
+        MetaScreenSettingsRepository.ensureLoaded()
+        MetaScreenSettingsRepository.uiState
+    }.collectAsStateWithLifecycle()
     val networkStatusUiState by NetworkStatusRepository.uiState.collectAsStateWithLifecycle()
     val continueEntries = remember(uiState.completedItems, homeContinueWatching, continueWatchingPreferences.isVisible) {
         if (continueWatchingPreferences.isVisible) {
@@ -160,6 +171,17 @@ fun DownloadsScreen(
         selectedShowId?.let { showId ->
             completedEpisodes.firstOrNull { it.parentMetaId == showId }?.title
         }
+    }
+    // Only the finished episodes of the open show, shaped like a details-screen series so the
+    // shared episode cards can render them (offline, no fetch).
+    val selectedShowEpisodes = remember(selectedShowId, completedEpisodes) {
+        selectedShowId?.let { showId ->
+            completedEpisodes.filter { it.parentMetaId == showId }
+        }.orEmpty()
+    }
+    val selectedShowMeta = remember(selectedShowEpisodes) { selectedShowEpisodes.toDownloadedShowMeta() }
+    val selectedShowProgress = remember(watchProgressUiState.entries, selectedShowId) {
+        selectedShowId?.let { showId -> watchProgressUiState.byVideoIdForContent(showId) }.orEmpty()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -280,11 +302,14 @@ fun DownloadsScreen(
                     )
                 } else {
                     downloadsShowContent(
-                        showId = selectedShowId.orEmpty(),
-                        episodes = completedEpisodes,
+                        meta = selectedShowMeta,
+                        episodes = selectedShowEpisodes,
+                        progressByVideoId = selectedShowProgress,
+                        watchedKeys = watchedUiState.watchedKeys,
+                        episodeCardStyle = metaScreenSettings.episodeCardStyle,
+                        blurUnwatchedEpisodes = metaScreenSettings.blurUnwatchedEpisodes,
                         onOpenDownload = onOpenDownload,
                         onEpisodeLongPress = { episode -> openMenu(DownloadsMenuTarget.Episode(episode)) },
-                        onDeleteDownload = { downloadPendingDeletionId = it },
                     )
                 }
             }
@@ -308,6 +333,7 @@ fun DownloadsScreen(
                         menuTarget = null
                         menuAnchor = null
                     },
+                    blurUnwatchedEpisodes = metaScreenSettings.blurUnwatchedEpisodes,
                 )
             }
         }
@@ -449,26 +475,16 @@ private fun LazyListScope.downloadsRootContent(
 }
 
 private fun LazyListScope.downloadsShowContent(
-    showId: String,
+    meta: MetaDetails?,
     episodes: List<DownloadItem>,
+    progressByVideoId: Map<String, WatchProgressEntry>,
+    watchedKeys: Set<String>,
+    episodeCardStyle: MetaEpisodeCardStyle,
+    blurUnwatchedEpisodes: Boolean,
     onOpenDownload: (DownloadItem) -> Unit,
     onEpisodeLongPress: (DownloadItem) -> Unit,
-    onDeleteDownload: (String) -> Unit,
 ) {
-    val showEpisodes = episodes
-        .filter { it.parentMetaId == showId }
-        .sortedForSeriesDownloads()
-
-    val seasons = showEpisodes
-        .groupBy { it.seasonNumber ?: 0 }
-        .toList()
-        .sortedWith(
-            compareBy<Pair<Int, List<DownloadItem>>> { (season, _) ->
-                if (season == 0) 0 else 1
-            }.thenBy { (season, _) -> if (season == 0) 0 else season },
-        )
-
-    if (seasons.isEmpty()) {
+    if (meta == null) {
         item {
             Box(
                 modifier = Modifier
@@ -486,34 +502,62 @@ private fun LazyListScope.downloadsShowContent(
         return
     }
 
-    seasons.forEach { (seasonNumber, entries) ->
-        item {
-            SectionTitle(
-                if (seasonNumber == 0) {
-                    stringResource(Res.string.episodes_specials)
-                } else {
-                    stringResource(Res.string.episodes_season, seasonNumber)
-                },
-            )
-        }
-
-        val sortedEpisodes = entries.sortedForSeriesDownloads()
-
-        items(
-            items = sortedEpisodes,
-            key = { it.id },
-        ) { item ->
-            DownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onPause = { DownloadsRepository.pauseDownload(item.id) },
-                onResume = { DownloadsRepository.resumeDownload(item.id) },
-                onRetry = { DownloadsRepository.retryDownload(item.id) },
-                onDelete = { onDeleteDownload(item.id) },
-                onLongPress = { onEpisodeLongPress(item) },
-            )
+    // The episode section of the details screen (season selector, Horizontal or List cards), fed
+    // with the downloaded episodes only.
+    item(key = "downloads-show-episodes") {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val contentHorizontalPadding = if (maxWidth >= 600.dp) 32.dp else 18.dp
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = contentHorizontalPadding)
+                    .padding(bottom = 20.dp),
+            ) {
+                DetailSeriesContent(
+                    meta = meta,
+                    horizontalScrollPadding = contentHorizontalPadding,
+                    episodeCardStyle = episodeCardStyle,
+                    progressByVideoId = progressByVideoId,
+                    watchedKeys = watchedKeys,
+                    blurUnwatchedEpisodes = blurUnwatchedEpisodes,
+                    onEpisodeClick = { video ->
+                        episodes.downloadFor(video)?.takeIf(DownloadItem::isPlayable)?.let(onOpenDownload)
+                    },
+                    onEpisodeLongPress = { video ->
+                        episodes.downloadFor(video)?.let(onEpisodeLongPress)
+                    },
+                    liftEpisodesOnLongPress = true,
+                )
+            }
         }
     }
+}
+
+private fun List<DownloadItem>.downloadFor(video: MetaVideo): DownloadItem? =
+    firstOrNull { it.seasonNumber == video.season && it.episodeNumber == video.episode }
+
+/** The downloaded episodes of one show as a series [MetaDetails]; the episodes are its only content. */
+private fun List<DownloadItem>.toDownloadedShowMeta(): MetaDetails? {
+    val episodes = filter(DownloadItem::isEpisode).sortedForSeriesDownloads()
+    val first = episodes.firstOrNull() ?: return null
+    return MetaDetails(
+        id = first.parentMetaId,
+        type = first.parentMetaType,
+        name = first.title,
+        poster = episodes.firstNotNullOfOrNull { it.poster },
+        background = episodes.firstNotNullOfOrNull { it.background },
+        logo = episodes.firstNotNullOfOrNull { it.logo },
+        videos = episodes.map { item ->
+            MetaVideo(
+                id = item.videoId,
+                title = item.episodeTitle?.trim()?.takeIf { it.isNotBlank() }
+                    ?: "Episode ${item.episodeNumber}",
+                thumbnail = item.episodeThumbnail,
+                season = item.seasonNumber,
+                episode = item.episodeNumber,
+            )
+        },
+    )
 }
 
 @Composable
@@ -524,7 +568,6 @@ private fun DownloadRow(
     onResume: () -> Unit,
     onRetry: () -> Unit,
     onDelete: () -> Unit,
-    onLongPress: (() -> Unit)? = null,
 ) {
     val displayTitle = item.displayTitle()
     val displaySubtitle = downloadDisplaySubtitle(
@@ -532,21 +575,13 @@ private fun DownloadRow(
         displayTitle = displayTitle,
     )
 
-    // The padding sits outside the long-press target, so the lifted copy is exactly the card.
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .posterCardClickable(
-                    onClick = onOpen.takeIf { item.isPlayable },
-                    onLongClick = onLongPress,
-                    zoomImageUrl = item.episodeThumbnail ?: item.background ?: item.poster,
-                    zoomCornerRadius = 12.dp,
-                ),
+            modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.medium,
             color = MaterialTheme.colorScheme.surfaceContainerLow,
         ) {
