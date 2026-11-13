@@ -33,9 +33,15 @@ internal fun DrawScope.jellyPillPath(frame: JellyFrame, count: Int): Path {
     val tabWidth = (size.width - 2 * inset) / count
     val itemHeight = size.height - 2 * inset
     val centerX = inset + (frame.position + 0.5f) * tabWidth
+    // Equal outward growth (in px) on all four sides. A ratio-scaled wide pill grows far more at
+    // its sides than at its top/bottom, and the velocity squash even shrank its height.
+    val swell = tabWidth * frame.pillSwell / 2
+    // Horizontal: the swell plus the velocity stretch (pillScaleX = shape spring / speed term).
     val halfWidth = tabWidth * frame.pillScaleX / 2
-    val halfHeight = itemHeight * frame.pillScaleY / 2
-    val radius = min(tabWidth, itemHeight) / 2
+    // Vertical: resting height plus the same swell, never squashed. It may extend a few dp past
+    // the bar; nothing clips the pill, and the fill/glow rects are taller than the largest swell.
+    val halfHeight = itemHeight / 2 + swell
+    val radius = min(halfWidth, halfHeight)
     return Path().apply {
         addRoundRect(
             RoundRect(
@@ -43,7 +49,7 @@ internal fun DrawScope.jellyPillPath(frame: JellyFrame, count: Int): Path {
                 top = size.height / 2 - halfHeight,
                 right = centerX + halfWidth,
                 bottom = size.height / 2 + halfHeight,
-                cornerRadius = CornerRadius(radius * frame.pillScaleX, radius * frame.pillScaleY),
+                cornerRadius = CornerRadius(radius, radius),
             ),
         )
     }

@@ -13,6 +13,11 @@ internal data class JellyFrame(
     val position: Float,
     val pillScaleX: Float = 1f,
     val pillScaleY: Float = 1f,
+    /**
+     * Pure swell of the pill (shape spring - 1, without the velocity stretch/squash): the pill
+     * grows by `tabWidth * pillSwell / 2` dp outward on every side, left/right AND top/bottom.
+     */
+    val pillSwell: Float = 0f,
     val contentScale: Float = 1f,
     val panelOffset: Float = 0f,
     val trackScale: Float = 1f,
@@ -161,6 +166,7 @@ internal class JellyMotion(initialIndex: Int, count: Int) {
             position = position.value.toFloat(),
             pillScaleX = (scaleX.value / (1 - (speed * 0.75).coerceIn(-0.2, 0.2))).toFloat(),
             pillScaleY = (scaleY.value * (1 - (speed * 0.25).coerceIn(-0.2, 0.2))).toFloat(),
+            pillSwell = (scaleX.value - 1.0).toFloat(),
             contentScale = (1 + 0.2 * press.value).toFloat(),
             panelOffset = jellyPanelOffset(panel.value, width),
             trackScale = trackPress.value.toFloat(),
