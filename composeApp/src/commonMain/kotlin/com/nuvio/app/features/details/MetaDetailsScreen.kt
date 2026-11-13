@@ -1842,6 +1842,14 @@ fun MetaDetailsScreen(
                         episodeNumber = selectedEpisode.episode,
                         videoId = selectedEpisode.id,
                     )
+                    val downloadedSeasonEpisodes = seasonEpisodes.mapNotNull { episode ->
+                        DownloadsRepository.findPlayableDownload(
+                            parentMetaId = meta.id,
+                            seasonNumber = episode.season,
+                            episodeNumber = episode.episode,
+                            videoId = episode.id,
+                        )
+                    }
                     if (
                         onDownloadSource != null &&
                         downloadedEpisode == null &&
@@ -1879,12 +1887,6 @@ fun MetaDetailsScreen(
                         )
                     }
                     // Delete what is downloaded: this episode, and the season when all of it is.
-                    val downloadedEpisode = DownloadsRepository.findPlayableDownload(
-                        parentMetaId = meta.id,
-                        seasonNumber = selectedEpisode.season,
-                        episodeNumber = selectedEpisode.episode,
-                        videoId = selectedEpisode.id,
-                    )
                     if (downloadedEpisode != null) {
                         add(
                             PosterZoomOverlayAction(
@@ -1899,14 +1901,6 @@ fun MetaDetailsScreen(
                                     )
                                 },
                             ),
-                        )
-                    }
-                    val downloadedSeasonEpisodes = seasonEpisodes.mapNotNull { episode ->
-                        DownloadsRepository.findPlayableDownload(
-                            parentMetaId = meta.id,
-                            seasonNumber = episode.season,
-                            episodeNumber = episode.episode,
-                            videoId = episode.id,
                         )
                     }
                     if (seasonEpisodes.isNotEmpty() && downloadedSeasonEpisodes.size == seasonEpisodes.size) {
@@ -1928,6 +1922,7 @@ fun MetaDetailsScreen(
                     if (
                         onDownloadSeason != null &&
                         seasonEpisodes.isNotEmpty() &&
+                        downloadedSeasonEpisodes.size < seasonEpisodes.size &&
                         playbackAvailability.canStream(meta.type, selectedEpisode.id)
                     ) {
                         add(
