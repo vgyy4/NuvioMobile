@@ -459,7 +459,10 @@ fun NuvioNavigationBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(
-                        horizontal = NuvioTokens.Space.s6,
+                        // Glass: the selected capsule (= item bounds) sits exactly 4 dp inside the
+                        // pill on all four sides (the items have no horizontal padding of their own
+                        // and the row fills this box), in the expanded and the compact state.
+                        horizontal = if (glass) NuvioTokens.Space.s4 else NuvioTokens.Space.s6,
                         vertical = NuvioTokens.Space.s4,
                     )
                     .then(if (glass) Modifier.glassPressFeedback(pillState) else Modifier),
