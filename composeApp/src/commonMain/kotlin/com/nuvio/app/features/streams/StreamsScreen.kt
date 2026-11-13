@@ -240,7 +240,9 @@ fun StreamsScreen(
             subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
         )
         NuvioToastController.show(result.toastMessage())
-        val started = result == DownloadEnqueueResult.Started || result == DownloadEnqueueResult.Replaced
+        val started = result == DownloadEnqueueResult.Started ||
+            result == DownloadEnqueueResult.Replaced ||
+            result == DownloadEnqueueResult.SharedExisting
         if (started && seasonBatch.isNotEmpty()) {
             // The rest of the season: same release as the one just picked, same subtitle choice.
             SeasonDownloadCoordinator.start(
