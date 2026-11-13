@@ -18,7 +18,7 @@ internal class DownloadSubtitlePrompt(
 
 @Composable
 internal fun DownloadSubtitlePromptDialog(prompt: DownloadSubtitlePrompt) {
-    val languages = prompt.languageCodes.joinToString(", ") { languageLabelForCode(it) }
+    val languages = prompt.languageCodes.map { languageLabelForCode(it) }.joinToString(", ")
     DialogSurface(
         onDismissRequest = { prompt.answer.complete(null) },
         title = stringResource(Res.string.download_subtitles_prompt_title),

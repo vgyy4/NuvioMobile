@@ -53,7 +53,7 @@ internal fun DownloadSubtitleSettings(isTablet: Boolean) {
                 description = if (preferences.subtitleLanguages.isEmpty()) {
                     stringResource(Res.string.settings_downloads_subtitles_languages_all)
                 } else {
-                    preferences.subtitleLanguages.joinToString(", ") { languageLabelForCode(it) }
+                    preferences.subtitleLanguages.map { languageLabelForCode(it) }.joinToString(", ")
                 },
                 enabled = preferences.subtitleMode != DownloadSubtitleMode.Never,
                 isTablet = isTablet,
