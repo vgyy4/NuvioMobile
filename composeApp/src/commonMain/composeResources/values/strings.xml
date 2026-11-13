@@ -1702,6 +1702,11 @@
     <string name="delete_download_season_title">Delete this season?</string>
     <string name="delete_download_show">Delete all episodes</string>
     <string name="delete_download_show_title">Delete all episodes?</string>
+    <string name="delete_download_watched">Delete watched</string>
+    <string name="delete_download_watched_title">Delete watched downloads?</string>
+    <string name="delete_download_watched_message">%1$d downloads you finished watching will be removed from this device.</string>
+    <string name="downloads_section_finished">Finished watching</string>
+    <string name="downloads_delete_finished">Delete watched</string>
     <string name="delete_download_message">The downloaded file will be removed from this device.</string>
     <string name="delete_download_season_message">%1$d downloaded episodes will be removed from this device.</string>
     <string name="season_download_action">Download season</string>

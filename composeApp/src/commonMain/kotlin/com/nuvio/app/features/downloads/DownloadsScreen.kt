@@ -1,6 +1,10 @@
 package com.nuvio.app.features.downloads
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,12 +19,14 @@ import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,12 +38,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
 import com.nuvio.app.core.i18n.localizedByteUnit
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.NuvioScreen
@@ -52,6 +61,7 @@ import com.nuvio.app.features.home.components.HomeContinueWatchingSectionBottomP
 import com.nuvio.app.features.home.rememberCachedHomeContinueWatchingItems
 import com.nuvio.app.features.tracking.WatchProgressSource
 import com.nuvio.app.features.watched.WatchedRepository
+import com.nuvio.app.features.watched.watchedItemKeys
 import com.nuvio.app.features.watchprogress.ContinueWatchingItem
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesRepository
 import com.nuvio.app.features.watchprogress.ContinueWatchingPreferencesUiState
@@ -135,6 +145,25 @@ fun DownloadsScreen(
     }
     val downloadedMovies = remember(completedItems) { completedItems.toDownloadedMovies() }
     val downloadedShows = remember(completedItems) { completedItems.toDownloadedShows() }
+    // Downloaded movies and episodes that were watched to the end, most recent download first.
+    val finishedDownloads = remember(completedItems, watchedUiState.watchedKeys, watchProgressUiState) {
+        completedItems
+            .filter { item ->
+                watchedItemKeys(
+                    type = item.parentMetaType,
+                    id = item.parentMetaId,
+                    season = item.seasonNumber,
+                    episode = item.episodeNumber,
+                ).any(watchedUiState.watchedKeys::contains) ||
+                    watchProgressUiState.progressForVideo(
+                        videoId = item.videoId,
+                        parentMetaId = item.parentMetaId,
+                        seasonNumber = item.seasonNumber,
+                        episodeNumber = item.episodeNumber,
+                    )?.isCompleted == true
+            }
+            .sortedByDescending { it.updatedAtEpochMs }
+    }
 
     val selectedShowTitle = remember(selectedShowId, completedEpisodes) {
         selectedShowId?.let { showId ->
@@ -199,6 +228,28 @@ fun DownloadsScreen(
                         continueDataSourceKey = watchProgressUiState.source,
                         movies = downloadedMovies,
                         shows = downloadedShows,
+                        finished = finishedDownloads,
+                        onFinishedLongPress = { item ->
+                            if (item.isEpisode) {
+                                openMenu(DownloadsMenuTarget.Episode(item))
+                            } else {
+                                listOf(item).toDownloadedMovies().firstOrNull()?.let { movie ->
+                                    openMenu(DownloadsMenuTarget.Title(title = movie, playTarget = item, resumes = false))
+                                }
+                            }
+                        },
+                        onFinishedTrash = { item ->
+                            deleteRequest = DeleteDownloadsRequest(
+                                if (item.isEpisode) DeleteDownloadsKind.Episode else DeleteDownloadsKind.Movie,
+                                listOf(item.id),
+                            )
+                        },
+                        onDeleteAllFinished = {
+                            deleteRequest = DeleteDownloadsRequest(
+                                DeleteDownloadsKind.Watched,
+                                finishedDownloads.map(DownloadItem::id),
+                            )
+                        },
                         watchedKeys = watchedUiState.watchedKeys,
                         fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                         onContinueClick = { item ->
@@ -298,6 +349,10 @@ private fun LazyListScope.downloadsRootContent(
     continueDataSourceKey: WatchProgressSource,
     movies: List<DownloadedTitle>,
     shows: List<DownloadedTitle>,
+    finished: List<DownloadItem>,
+    onFinishedLongPress: (DownloadItem) -> Unit,
+    onFinishedTrash: (DownloadItem) -> Unit,
+    onDeleteAllFinished: () -> Unit,
     watchedKeys: Set<String>,
     fullyWatchedSeriesKeys: Set<String>,
     onContinueClick: (ContinueWatchingItem) -> Unit,
@@ -367,6 +422,23 @@ private fun LazyListScope.downloadsRootContent(
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
                 onRetry = { DownloadsRepository.retryDownload(item.id) },
                 onDelete = { onDeleteDownload(item.id) },
+            )
+        }
+    }
+
+    if (finished.isNotEmpty()) {
+        item(key = "downloads-finished-header") {
+            FinishedWatchingHeader(onDeleteAll = onDeleteAllFinished)
+        }
+        items(
+            items = finished,
+            key = { "finished-${it.id}" },
+        ) { item ->
+            FinishedDownloadRow(
+                item = item,
+                onOpen = { onOpenDownload(item) },
+                onLongPress = { onFinishedLongPress(item) },
+                onTrash = { onFinishedTrash(item) },
             )
         }
     }
@@ -617,6 +689,124 @@ private fun downloadDisplaySubtitle(
         item.episodeTitle?.trim().orEmpty().takeIf { it.isNotBlank() && it != displayTitle },
         item.title.trim().takeIf { it.isNotBlank() && it != displayTitle },
     ).filterNotNull().joinToString(" • ")
+}
+
+@Composable
+private fun FinishedWatchingHeader(onDeleteAll: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(Res.string.downloads_section_finished),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.SemiBold,
+        )
+        TextButton(
+            onClick = onDeleteAll,
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        ) {
+            Text(text = stringResource(Res.string.downloads_delete_finished))
+        }
+    }
+}
+
+/** A downloaded movie or episode that was watched to the end: tap plays, long-press opens the menu, the trash deletes it. */
+@Composable
+private fun FinishedDownloadRow(
+    item: DownloadItem,
+    onOpen: () -> Unit,
+    onLongPress: () -> Unit,
+    onTrash: () -> Unit,
+) {
+    val displayTitle = item.displayTitle()
+    val displaySubtitle = downloadDisplaySubtitle(item = item, displayTitle = displayTitle)
+    val image = item.episodeThumbnail ?: item.background ?: item.poster
+
+    // The padding sits outside the long-press target, so the lifted copy is exactly the card.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .posterCardClickable(
+                    onClick = onOpen.takeIf { item.isPlayable },
+                    onLongClick = onLongPress,
+                    zoomImageUrl = image,
+                    zoomCornerRadius = 12.dp,
+                ),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+        ) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 52.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(96.dp)
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainer),
+                    ) {
+                        if (image != null) {
+                            AsyncImage(
+                                model = image,
+                                contentDescription = null,
+                                modifier = Modifier.matchParentSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = displaySubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = statusText(item),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onTrash,
+                    modifier = Modifier.align(Alignment.TopEnd),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Delete,
+                        contentDescription = stringResource(Res.string.action_delete),
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
