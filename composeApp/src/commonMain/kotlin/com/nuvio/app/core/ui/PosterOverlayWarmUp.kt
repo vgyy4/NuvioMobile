@@ -6,8 +6,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
@@ -25,6 +33,10 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import dev.chrisbanes.haze.HazeState
+import kotlinx.coroutines.delay
+import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.sidebar_library
+import nuvio.composeapp.generated.resources.sidebar_search
 
 /** Remembers, for the life of the process, that the overlay pipelines have been warmed up. */
 internal object PosterOverlayWarmUpGate {
@@ -134,6 +146,96 @@ private fun recordWarmUpPoster(source: PosterLiftSource, density: Density) {
             ),
             cornerRadius = radius,
             style = Stroke(width = 2f),
+        )
+    }
+}
+
+/** Remembers, for the life of the process, that the navigation bar's glass has been warmed up. */
+internal object NavBarGlassWarmUpGate {
+    var completed = false
+}
+
+/** Shows the nav bar warm-up while [running] says so; reading it here keeps the caller from recomposing. */
+@Composable
+internal fun NavBarGlassWarmUpHost(
+    running: () -> Boolean,
+    hazeState: HazeState,
+    modifier: Modifier,
+    onFinished: () -> Unit,
+) {
+    if (running()) {
+        NavBarGlassWarmUp(hazeState = hazeState, modifier = modifier, onFinished = onFinished)
+    }
+}
+
+/**
+ * Runs the real glass navigation bar once, invisibly, through every state the user can trigger:
+ * expanded at rest, collapse to compact, a tab slide while compact, expand, another slide, and a
+ * second compact/expand cycle. It is the real bar (same composition, same haze state and blur
+ * source, same width constraints), so the one-time work is done before the first real use:
+ * compiling the GPU pipelines for the blur, rim/gloss gradients, capsule and shadow, allocating the
+ * blur's render targets, and running the layout/animation code. Like [PosterOverlayWarmUp] it must
+ * sit below the opaque page content that carries the blur source, so it is never seen; it has no
+ * semantics and receives no touches there.
+ */
+@Composable
+private fun NavBarGlassWarmUp(
+    hazeState: HazeState,
+    modifier: Modifier,
+    onFinished: () -> Unit,
+) {
+    val scrollState = remember { NuvioNavBarScrollState() }
+    var selectedIndex by remember { mutableIntStateOf(0) }
+    val currentOnFinished = rememberUpdatedState(onFinished)
+    LaunchedEffect(Unit) {
+        delay(300)
+        scrollState.collapse()
+        delay(450)
+        selectedIndex = 1
+        delay(450)
+        scrollState.expand()
+        delay(450)
+        selectedIndex = 2
+        delay(450)
+        scrollState.collapse()
+        delay(450)
+        scrollState.expand()
+        delay(450)
+        currentOnFinished.value()
+    }
+    val items = listOf(
+        FloatingNavigationItem(
+            label = "Home",
+            selected = selectedIndex == 0,
+            onClick = {},
+            icon = Icons.Filled.Home,
+        ),
+        FloatingNavigationItem(
+            label = "Search",
+            selected = selectedIndex == 1,
+            onClick = {},
+            drawable = Res.drawable.sidebar_search,
+        ),
+        FloatingNavigationItem(
+            label = "Library",
+            selected = selectedIndex == 2,
+            onClick = {},
+            drawable = Res.drawable.sidebar_library,
+        ),
+        FloatingNavigationItem(
+            label = "Profile",
+            selected = selectedIndex == 3,
+            onClick = {},
+            icon = Icons.Filled.Person,
+        ),
+    )
+    CompositionLocalProvider(LocalNuvioGlassNavigationBar provides true) {
+        FloatingNavigationBar(
+            items = items,
+            modifier = modifier.clearAndSetSemantics {},
+            scrollState = scrollState,
+            hazeState = hazeState,
+            glowEnabled = false,
         )
     }
 }

@@ -25,6 +25,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +39,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.ui.LocalNuvioBottomNavigationOverlayPadding
 import com.nuvio.app.core.ui.LocalNuvioGlassNavigationBar
 import com.nuvio.app.core.ui.LocalNuvioNavBarScrollState
+import com.nuvio.app.core.ui.NavBarGlassWarmUpGate
+import com.nuvio.app.core.ui.NavBarGlassWarmUpHost
 import com.nuvio.app.core.ui.NuvioNavBarScrollState
 import com.nuvio.app.core.ui.NuvioClassicNavigationBar
 import com.nuvio.app.core.ui.FloatingNavigationBar
@@ -48,6 +52,7 @@ import com.nuvio.app.features.profiles.ProfileSwitcherTab
 import com.nuvio.app.features.settings.NavBarStyle
 import com.nuvio.app.features.settings.ThemeSettingsRepository
 import dev.chrisbanes.haze.hazeSource
+import kotlinx.coroutines.delay
 import dev.chrisbanes.haze.rememberHazeState
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.compose_nav_home
@@ -157,6 +162,18 @@ internal fun MainTabsDestination(
             ),
         )
 
+        // One-off, invisible run of the glass bar through its states (see NavBarGlassWarmUp), a
+        // little after the first screen is ready.
+        var navBarWarmUpRunning by remember { mutableStateOf(false) }
+        val navBarWarmUpEligible = iosComposeShell && showBottomFloatingBar && initialHomeReady && rootRouteActive
+        LaunchedEffect(navBarWarmUpEligible) {
+            if (!navBarWarmUpEligible || NavBarGlassWarmUpGate.completed) return@LaunchedEffect
+            delay(2_000)
+            if (NavBarGlassWarmUpGate.completed) return@LaunchedEffect
+            NavBarGlassWarmUpGate.completed = true
+            navBarWarmUpRunning = true
+        }
+
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
@@ -200,6 +217,15 @@ internal fun MainTabsDestination(
             },
         ) { innerPadding ->
             Box(modifier = Modifier.fillMaxSize()) {
+                // Below the page content, which is opaque, so it is never seen.
+                NavBarGlassWarmUpHost(
+                    running = { navBarWarmUpRunning && rootRouteActive },
+                    hazeState = navBarHazeState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .then(if (bottomBarOnTablet) Modifier.widthIn(max = 416.dp) else Modifier),
+                    onFinished = { navBarWarmUpRunning = false },
+                )
                 CompositionLocalProvider(
                     LocalNuvioBottomNavigationOverlayPadding provides if (useNativeBottomTabs) 49.dp else if (showBottomFloatingBar) 72.dp else 0.dp,
                     LocalNuvioNavBarScrollState provides navBarScrollState,

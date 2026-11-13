@@ -43,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
@@ -51,7 +50,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -67,6 +69,9 @@ import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.offset
 import dev.chrisbanes.haze.HazeInputScale
@@ -180,13 +185,47 @@ internal val LocalNuvioGlassNavigationBar = staticCompositionLocalOf { false }
 
 private val GlassBaseColor = Color(0xFF1C1C1E)
 
+/** Horizontal inset of the expanded pill; the glass layer always has the expanded width. */
+private val GlassExpandedInset = 28.dp
+
+/** Constant height of the glass layer: at least the expanded pill (65 dp), clipped to the real size. */
+private val GlassLayerHeight = 68.dp
+
+/**
+ * Visible rect (size) of the pill as laid out right now. Written by the pill's layout, read only in
+ * the draw/layer phases, so the compact <-> expanded animation never recomposes or re-sizes the
+ * blur: the glass layer keeps a constant size and only a clip window and the edge drawings follow.
+ */
+@Stable
+private class GlassWindow {
+    var width by mutableFloatStateOf(0f)
+    var height by mutableFloatStateOf(0f)
+}
+
+/** Fully rounded window, bottom-aligned and centred in the (larger, constant-size) glass layer. */
+private data class GlassWindowShape(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline =
+        Outline.Rounded(RoundRect(left, top, right, bottom, CornerRadius((bottom - top) / 2f)))
+}
+
 /**
  * Soft drop shadow of the system bar: stacked translucent rounded rects drawn only outside the
- * pill outline (so the translucent glass is not darkened from behind). Draw phase only.
+ * pill outline (so the translucent glass is not darkened from behind). Draw phase only; the outline
+ * is the live [window] rect.
  */
-private fun Modifier.glassBarShadow(): Modifier = drawBehind {
+private fun Modifier.glassBarShadow(window: GlassWindow): Modifier = drawBehind {
+    val windowWidth = window.width
+    val windowHeight = window.height
+    if (windowWidth <= 0f || windowHeight <= 0f) return@drawBehind
+    val left = (size.width - windowWidth) / 2f
+    val top = size.height - windowHeight
     val outline = Path().apply {
-        addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(size.height / 2f)))
+        addRoundRect(RoundRect(left, top, left + windowWidth, top + windowHeight, CornerRadius(windowHeight / 2f)))
     }
     val offsetY = 6.dp.toPx()
     clipPath(outline, ClipOp.Difference) {
@@ -194,9 +233,9 @@ private fun Modifier.glassBarShadow(): Modifier = drawBehind {
             val spread = layer * 2.dp.toPx()
             drawRoundRect(
                 color = Color.Black.copy(alpha = 0.03f),
-                topLeft = Offset(-spread, -spread + offsetY),
-                size = Size(size.width + 2f * spread, size.height + 2f * spread),
-                cornerRadius = CornerRadius(size.height / 2f + spread),
+                topLeft = Offset(left - spread, top - spread + offsetY),
+                size = Size(windowWidth + 2f * spread, windowHeight + 2f * spread),
+                cornerRadius = CornerRadius(windowHeight / 2f + spread),
             )
         }
     }
@@ -204,37 +243,106 @@ private fun Modifier.glassBarShadow(): Modifier = drawBehind {
 
 /**
  * Specular edge of the glass: a lit rim (bright at the top-left and, fainter, at the bottom-right),
- * a soft top gloss and a small highlight near the top-left corner. Cached per size.
+ * a soft top gloss and a small highlight near the top-left corner, drawn on the live [window] rect
+ * (draw phase only; plain gradients, no blur).
  */
-private fun Modifier.glassBarHighlights(): Modifier = drawWithCache {
+private fun Modifier.glassBarHighlights(window: GlassWindow): Modifier = drawBehind {
+    val windowWidth = window.width
+    val windowHeight = window.height
+    if (windowWidth <= 0f || windowHeight <= 0f) return@drawBehind
+    val left = (size.width - windowWidth) / 2f
+    val top = size.height - windowHeight
     val rimWidth = 1.dp.toPx()
-    val rim = Brush.linearGradient(
-        colors = listOf(
-            Color.White.copy(alpha = 0.55f),
-            Color.White.copy(alpha = 0.07f),
-            Color.White.copy(alpha = 0.05f),
-            Color.White.copy(alpha = 0.28f),
+    drawRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.02f), Color.Transparent),
+            startY = top,
+            endY = top + windowHeight,
         ),
-        start = Offset.Zero,
-        end = Offset(size.width, size.height),
+        topLeft = Offset(left, top),
+        size = Size(windowWidth, windowHeight),
     )
-    val gloss = Brush.verticalGradient(
-        listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.02f), Color.Transparent),
+    drawRect(
+        brush = Brush.radialGradient(
+            colors = listOf(Color.White.copy(alpha = 0.14f), Color.Transparent),
+            center = Offset(left + windowHeight * 0.7f, top),
+            radius = windowHeight * 1.5f,
+        ),
+        topLeft = Offset(left, top),
+        size = Size(windowWidth, windowHeight),
     )
-    val corner = Brush.radialGradient(
-        colors = listOf(Color.White.copy(alpha = 0.14f), Color.Transparent),
-        center = Offset(size.height * 0.7f, 0f),
-        radius = size.height * 1.5f,
+    drawRoundRect(
+        brush = Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.55f),
+                Color.White.copy(alpha = 0.07f),
+                Color.White.copy(alpha = 0.05f),
+                Color.White.copy(alpha = 0.28f),
+            ),
+            start = Offset(left, top),
+            end = Offset(left + windowWidth, top + windowHeight),
+        ),
+        topLeft = Offset(left + rimWidth / 2f, top + rimWidth / 2f),
+        size = Size(windowWidth - rimWidth, windowHeight - rimWidth),
+        cornerRadius = CornerRadius((windowHeight - rimWidth) / 2f),
+        style = Stroke(rimWidth),
     )
-    onDrawBehind {
-        drawRect(gloss)
-        drawRect(corner)
-        drawRoundRect(
-            brush = rim,
-            topLeft = Offset(rimWidth / 2f, rimWidth / 2f),
-            size = Size(size.width - rimWidth, size.height - rimWidth),
-            cornerRadius = CornerRadius((size.height - rimWidth) / 2f),
-            style = Stroke(rimWidth),
+}
+
+/**
+ * The glass itself: haze blur + tint, lit rim/gloss and shadow. Its size is CONSTANT (expanded
+ * width x [GlassLayerHeight]); the visible pill is a rounded clip window (draw-phase layer
+ * properties) over it. Resizing the blurred node every frame of the compact <-> expanded animation
+ * would re-allocate/re-render the blur's render target each frame; with a constant node only a
+ * clip outline changes, which does not touch the blur at all.
+ */
+@Composable
+private fun GlassBarLayer(
+    window: GlassWindow,
+    pillState: NavPillState,
+    hazeState: HazeState?,
+    blurInputScale: HazeInputScale,
+) {
+    Box(
+        modifier = Modifier
+            .layout { measurable, constraints ->
+                val width = (constraints.maxWidth - 2 * GlassExpandedInset.roundToPx()).coerceAtLeast(0)
+                val height = GlassLayerHeight.roundToPx()
+                val placeable = measurable.measure(Constraints.fixed(width, height))
+                layout(width, height) { placeable.place(0, 0) }
+            }
+            .graphicsLayer {
+                // Touch-down scale about the centre of the visible pill (same point as the items).
+                val scale = 1f + 0.025f * pillState.pressFraction
+                scaleX = scale
+                scaleY = scale
+                val originY = if (size.height > 0f) (size.height - window.height / 2f) / size.height else 0.5f
+                transformOrigin = TransformOrigin(0.5f, originY)
+            }
+            .glassBarShadow(window),
+    ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .graphicsLayer {
+                    val windowWidth = window.width
+                    val left = (size.width - windowWidth) / 2f
+                    shape = GlassWindowShape(left, size.height - window.height, left + windowWidth, size.height)
+                    clip = true
+                }
+                .then(
+                    if (hazeState != null) {
+                        Modifier.hazeEffect(state = hazeState) {
+                            blurRadius = 30.dp
+                            inputScale = blurInputScale
+                            noiseFactor = 0f
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .background(GlassBaseColor.copy(alpha = if (hazeState == null) 0.82f else 0.42f))
+                .glassBarHighlights(window),
         )
     }
 }
@@ -280,11 +388,12 @@ fun NuvioNavigationBar(
 
     val scope = rememberCoroutineScope()
     val pillState = remember { NavPillState(scope) }
+    val glassWindow = remember { GlassWindow() }
     val selectedPillColor = MaterialTheme.nuvio.colors.accent.copy(alpha = NuvioTokens.Opacity.selected)
 
     // Dynamic horizontal padding: pill shrinks when labels are hidden — driven by same labelFraction.
     // Applied while measuring, so the animation does not recompose the bar and its items.
-    val expandedHorizontalPadding = 28.dp
+    val expandedHorizontalPadding = GlassExpandedInset
     val collapsedHorizontalPadding = 58.dp
 
     // Outer container — no background, just safe padding
@@ -294,6 +403,9 @@ fun NuvioNavigationBar(
             .padding(contentPadding),
         contentAlignment = Alignment.BottomCenter,
     ) {
+        if (glass) {
+            GlassBarLayer(glassWindow, pillState, hazeState, blurInputScale)
+        }
         // The floating pill
         val pillModifier = Modifier
             .layout { measurable, constraints ->
@@ -305,50 +417,42 @@ fun NuvioNavigationBar(
                     (placeable.width + 2 * padding).coerceIn(constraints.minWidth, constraints.maxWidth),
                     placeable.height,
                 ) {
+                    if (glass) {
+                        glassWindow.width = placeable.width.toFloat()
+                        glassWindow.height = placeable.height.toFloat()
+                    }
                     placeable.placeRelative(padding, 0)
                 }
             }
             .fillMaxWidth()
             .then(
                 if (glass) {
-                    // Draw-phase only: reads the press spring when the layer is drawn.
-                    Modifier.graphicsLayer {
-                        val scale = 1f + 0.025f * pillState.pressFraction
-                        scaleX = scale
-                        scaleY = scale
-                    }.then(Modifier.glassBarShadow())
-                } else {
+                    // The glass (blur, tint, rim, shadow) is the separate constant-size layer above;
+                    // this only scales the content on touch-down (draw phase) and rounds its clip.
                     Modifier
-                },
-            )
-            .clip(RoundedCornerShape(NuvioTokens.Radius.full))
-            .then(
-                if (hazeState != null) {
-                    Modifier.hazeEffect(state = hazeState) {
-                        blurRadius = if (glass) 30.dp else 24.dp
-                        if (glass) {
-                            inputScale = blurInputScale
-                            noiseFactor = 0f
+                        .graphicsLayer {
+                            val scale = 1f + 0.025f * pillState.pressFraction
+                            scaleX = scale
+                            scaleY = scale
                         }
-                    }
+                        .clip(RoundedCornerShape(NuvioTokens.Radius.full))
                 } else {
                     Modifier
+                        .clip(RoundedCornerShape(NuvioTokens.Radius.full))
+                        .then(
+                            if (hazeState != null) {
+                                Modifier.hazeEffect(state = hazeState) {
+                                    blurRadius = 24.dp
+                                }
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .background(GlassBaseColor.copy(alpha = if (hazeState != null) 0.55f else 0.82f))
                 },
-            )
-            .background(
-                GlassBaseColor.copy(
-                    alpha = when {
-                        hazeState == null -> 0.82f
-                        glass -> 0.42f
-                        else -> 0.55f
-                    },
-                ),
             )
 
         Box(modifier = pillModifier) {
-            if (glass) {
-                Box(modifier = Modifier.matchParentSize().glassBarHighlights())
-            }
             // Padded content box shared by the sliding selection pill and the item row, so both use
             // the same coordinate origin (item bounds are measured relative to the row).
             Box(
