@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -79,11 +80,16 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Scroll-aware state for the floating navigation bar.
@@ -313,7 +319,7 @@ private fun GlassBarLayer(
             }
             .graphicsLayer {
                 // Touch-down scale about the centre of the visible pill (same point as the items).
-                val scale = 1f + 0.025f * pillState.pressFraction
+                val scale = pillState.trackScale
                 scaleX = scale
                 scaleY = scale
                 val originY = if (size.height > 0f) (size.height - window.height / 2f) / size.height else 0.5f
@@ -389,6 +395,7 @@ fun NuvioNavigationBar(
     val scope = rememberCoroutineScope()
     val pillState = remember { NavPillState(scope) }
     val glassWindow = remember { GlassWindow() }
+    pillState.glassMode = glass
     val selectedPillColor = MaterialTheme.nuvio.colors.accent.copy(alpha = NuvioTokens.Opacity.selected)
 
     // Dynamic horizontal padding: pill shrinks when labels are hidden — driven by same labelFraction.
@@ -428,14 +435,13 @@ fun NuvioNavigationBar(
             .then(
                 if (glass) {
                     // The glass (blur, tint, rim, shadow) is the separate constant-size layer above;
-                    // this only scales the content on touch-down (draw phase) and rounds its clip.
-                    Modifier
-                        .graphicsLayer {
-                            val scale = 1f + 0.025f * pillState.pressFraction
-                            scaleX = scale
-                            scaleY = scale
-                        }
-                        .clip(RoundedCornerShape(NuvioTokens.Radius.full))
+                    // this only scales the content on touch-down (draw phase). It is not clipped: like Android
+                    // the capsule may swell a little past the glass.
+                    Modifier.graphicsLayer {
+                        val scale = pillState.trackScale
+                        scaleX = scale
+                        scaleY = scale
+                    }
                 } else {
                     Modifier
                         .clip(RoundedCornerShape(NuvioTokens.Radius.full))
@@ -507,47 +513,138 @@ private class NavItemBounds {
 }
 
 /**
+ * Spring used by the glass capsule: the same closed-form integrator as the Android jelly bar's
+ * `JellySpring` (stiffness/damping ratio, critically damped when the ratio is exactly 1).
+ */
+private class GlassSpring(
+    var value: Double,
+    private val stiffness: Double,
+    private val dampingRatio: Double,
+) {
+    var velocity = 0.0
+
+    fun isAtRest(target: Double): Boolean = abs(value - target) < 0.0001 && abs(velocity) < 0.0001
+
+    fun advance(target: Double, seconds: Double) {
+        if (isAtRest(target)) {
+            value = target
+            velocity = 0.0
+            return
+        }
+        val displacement = value - target
+        val frequency = sqrt(stiffness)
+        if (dampingRatio == 1.0) {
+            val decay = exp(-frequency * seconds)
+            val coefficient = velocity + frequency * displacement
+            value = target + (displacement + coefficient * seconds) * decay
+            velocity = (velocity - frequency * coefficient * seconds) * decay
+        } else {
+            val damping = dampingRatio * frequency
+            val damped = frequency * sqrt(1 - dampingRatio * dampingRatio)
+            val decay = exp(-damping * seconds)
+            val cosine = cos(damped * seconds)
+            val sine = sin(damped * seconds)
+            val positionCoefficient = (velocity + damping * displacement) / damped
+            val velocityCoefficient = (damping * velocity + stiffness * displacement) / damped
+            value = target + decay * (displacement * cosine + positionCoefficient * sine)
+            velocity = decay * (velocity * cosine - velocityCoefficient * sine)
+        }
+    }
+}
+
+/**
  * Drives the selection pill that slides from the previously selected item to the new one.
  * Same spring as the Android floating bar's position spring (critically damped, stiffness 1000).
  *
  * The slide is a single 0..1 [Animatable] interpolating from the rect the pill was drawn at when
  * the selection changed to the live bounds of the selected item. [progress] and [layoutTick] are
  * only read in the draw phase, so nothing recomposes per frame.
+ *
+ * The glass bar additionally reproduces the Android jelly bar's TAP behaviour (JellyMotion.begin /
+ * finish / advance / publish): on touch-down the capsule starts moving to the tab under the finger
+ * and swells (shape springs towards 1.3, press spring towards 1), the bar scales to 1.025, and a
+ * velocity spring (fed with the slide velocity while the finger is down) stretches the capsule
+ * along the slide. On release the shape returns to 1 once the capsule has arrived. All values are
+ * published as snapshot floats that are read only in the draw/layer phases.
  */
 private class NavPillState(private val scope: CoroutineScope) {
     private val progress = Animatable(1f)
-    private val press = Animatable(0f)
-    private var pressOnSelected = false
-    private var travel = 0f
     private var target: NavItemBounds? = null
+    private var committed: NavItemBounds? = null
     private var hasFrom = false
     private var fromLeft = 0f
     private var fromTop = 0f
     private var fromWidth = 0f
     private var fromHeight = 0f
+    private var travelTabs = 0f
 
-    /** 0 at rest, ~1 while a finger is down on the bar (a spring: may undershoot on release). */
-    val pressFraction: Float get() = press.value
+    private val items = mutableListOf<NavItemBounds>()
 
-    /** Finger down at ([x], [y]) in the item row's coordinates. */
-    fun onPress(x: Float, y: Float) {
-        val current = target
-        pressOnSelected = current != null && current.placed &&
-            x >= current.left && x <= current.left + current.width &&
-            y >= current.top && y <= current.top + current.height
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            press.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 700f))
-        }
-    }
+    // Android JellyMotion springs (stiffness, damping ratio) for the tap feel.
+    private val velocity = GlassSpring(0.0, 300.0, 0.5)
+    private val press = GlassSpring(0.0, 1000.0, 1.0)
+    private val shapeX = GlassSpring(1.0, 250.0, 0.6)
+    private val shapeY = GlassSpring(1.0, 250.0, 0.7)
+    private val distortionDamping = 18.0 / (2 * sqrt(240.0 * 0.9))
+    private val trackPress = GlassSpring(1.0, 240.0 / 0.9, distortionDamping)
+    private var pressed = false
+    private var releasePending = false
+    private var pressTarget = 0.0
+    private var shapeTarget = 1.0
+    private var loop: Job? = null
 
-    fun onRelease() {
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            press.animateTo(0f, spring(dampingRatio = 0.5f, stiffness = 350f))
-        }
-    }
+    /** Set by the bar: the tap feel below is only for the glass bar; the classic bar is unchanged. */
+    var glassMode = false
+
+    /** Capsule scale (Android `pillScaleX/Y`): shape spring divided/multiplied by the speed term. */
+    var pillScaleX by mutableFloatStateOf(1f)
+        private set
+    var pillScaleY by mutableFloatStateOf(1f)
+        private set
+
+    /** Scale of the content under the capsule (Android `contentScale`, 1 + 0.2 * press). */
+    var contentScale by mutableFloatStateOf(1f)
+        private set
+
+    /** Whole-bar scale while the finger is down (Android `trackScale`, 1.025 at most). */
+    var trackScale by mutableFloatStateOf(1f)
+        private set
 
     /** Bumped when the selected item's bounds change so the pill follows it (e.g. label collapse). */
     private var layoutTick by mutableIntStateOf(0)
+
+    /** Registers a nav item (in composition order); the returned holder is filled by its layout. */
+    fun newItemBounds(): NavItemBounds = NavItemBounds().also { items += it }
+
+    private fun itemAt(x: Float): NavItemBounds? =
+        items.firstOrNull { it.placed && x >= it.left && x < it.left + it.width }
+            ?: items.filter { it.placed }.minByOrNull { abs(x - (it.left + it.width / 2f)) }
+
+    /** Finger down at ([x], [y]) in the item row's coordinates (Android `JellyMotion.begin`). */
+    fun onPress(x: Float, y: Float) {
+        val hit = itemAt(x)
+        pressed = true
+        releasePending = false
+        pressTarget = 1.0
+        shapeTarget = 1.3
+        if (hit != null && hit !== target) moveTo(hit)
+        ensureRunning()
+    }
+
+    /** Finger up (Android `JellyMotion.finish`); the capsule settles on the committed selection. */
+    fun onRelease() {
+        pressed = false
+        releasePending = true
+        ensureRunning()
+        scope.launch {
+            // The tap's selection is committed by the next recomposition's side effect. If it
+            // does not arrive (e.g. the profile long-press opened its popup), go back (Android
+            // `JellyMotion.cancel`).
+            repeat(3) { withFrameNanos { } }
+            val selected = committed
+            if (!pressed && selected != null && target !== selected) moveTo(selected)
+        }
+    }
 
     fun onItemPlaced(bounds: NavItemBounds, left: Float, top: Float, width: Float, height: Float) {
         if (bounds.placed && bounds.left == left && bounds.top == top &&
@@ -564,7 +661,22 @@ private class NavPillState(private val scope: CoroutineScope) {
     }
 
     fun onItemSelected(bounds: NavItemBounds) {
-        if (target === bounds) return
+        // Called on every recomposition of the selected item: only a real change of the selection
+        // moves the capsule (a repeat must not pull it back while a finger is down on another tab).
+        val changed = committed !== bounds
+        committed = bounds
+        if (!changed || target === bounds) return
+        moveTo(bounds)
+        if (glassMode && !pressed) {
+            // Selection without a touch (Android `JellyMotion.select`): no swell.
+            releasePending = true
+            pressTarget = 0.0
+            shapeTarget = 1.0
+            ensureRunning()
+        }
+    }
+
+    private fun moveTo(bounds: NavItemBounds) {
         val previous = target
         if (previous != null && previous.placed && bounds.placed) {
             // Start from where the pill is currently drawn so an interrupted slide continues smoothly.
@@ -582,7 +694,8 @@ private class NavPillState(private val scope: CoroutineScope) {
             }
             hasFrom = true
             target = bounds
-            travel = abs(bounds.left - fromLeft)
+            val tabWidth = bounds.width.coerceAtLeast(1f)
+            travelTabs = ((bounds.left + bounds.width / 2f) - (fromLeft + fromWidth / 2f)) / tabWidth
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 progress.snapTo(0f)
                 progress.animateTo(
@@ -601,14 +714,77 @@ private class NavPillState(private val scope: CoroutineScope) {
         }
     }
 
+    private fun ensureRunning() {
+        if (loop?.isActive == true) return
+        loop = scope.launch {
+            var previous = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                advance((now - previous) / 1_000_000_000.0)
+                previous = now
+                if (!isRunning()) break
+            }
+        }
+    }
+
+    private fun isRunning(): Boolean =
+        pressed || releasePending || !velocity.isAtRest(0.0) || !press.isAtRest(0.0) ||
+            !shapeX.isAtRest(1.0) || !shapeY.isAtRest(1.0) || !trackPress.isAtRest(1.0)
+
+    /** Android `JellyMotion.advance` + `publish`, for the springs that are not the slide itself. */
+    private fun advance(seconds: Double) {
+        val delta = seconds.coerceIn(0.0, 0.064)
+        val maxIndex = (items.size - 1).coerceAtLeast(0)
+        // Position velocity in tab units per second, divided by maxIndex, only while the finger is down.
+        val indexVelocity = if (hasFrom) progress.velocity.toDouble() * travelTabs else 0.0
+        velocity.advance(if (pressed && maxIndex > 0) indexVelocity / maxIndex else 0.0, delta)
+        val remaining = if (hasFrom) abs(1f - progress.value) * abs(travelTabs) else 0f
+        if (releasePending && remaining < maxOf(1, maxIndex) * 0.025) {
+            releasePending = false
+            pressTarget = 0.0
+            shapeTarget = 1.0
+        }
+        press.advance(pressTarget, delta)
+        shapeX.advance(shapeTarget, delta)
+        shapeY.advance(shapeTarget, delta)
+        trackPress.advance(if (pressed) 1.025 else 1.0, delta)
+        val speed = velocity.value / 10
+        pillScaleX = (shapeX.value / (1 - (speed * 0.75).coerceIn(-0.2, 0.2))).toFloat()
+        pillScaleY = (shapeY.value * (1 - (speed * 0.25).coerceIn(-0.2, 0.2))).toFloat()
+        contentScale = (1 + 0.2 * press.value).toFloat()
+        trackScale = trackPress.value.toFloat()
+    }
+
+    /**
+     * Scale of a nav item's content: [contentScale] weighted by how much the capsule covers the
+     * item (Android scales the cells inside the pill). Read in the layer phase.
+     */
+    fun contentScaleFor(bounds: NavItemBounds): Float {
+        val scale = contentScale
+        if (scale == 1f) return 1f
+        val t = progress.value
+        val current = target ?: return 1f
+        val currentCenter = current.left + current.width / 2f
+        val center = if (hasFrom) {
+            val fromCenter = fromLeft + fromWidth / 2f
+            fromCenter + (currentCenter - fromCenter) * t
+        } else {
+            currentCenter
+        }
+        val itemCenter = bounds.left + bounds.width / 2f
+        val coverage = (1f - abs(center - itemCenter) / bounds.width.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return 1f + (scale - 1f) * coverage
+    }
+
     fun DrawScope.drawSelectionPill(color: Color, glass: Boolean) {
-        // Always read so the draw layer is observing both, whatever state the pill is in.
+        // Always read so the draw layer is observing all of them, whatever state the pill is in.
         layoutTick
         val t = progress.value
-        // Read before any early return so the layer keeps observing the press spring.
-        val pressValue = press.value
+        val scaleX = pillScaleX
+        val scaleY = pillScaleY
         val current = target ?: return
-        if (!current.selected || !current.placed) return
+        if (!current.placed) return
+        if (!glass && !current.selected) return
         var left = current.left
         var top = current.top
         var width = current.width
@@ -622,30 +798,18 @@ private class NavPillState(private val scope: CoroutineScope) {
         if (width <= 0f || height <= 0f) return
         val radius = min(width, height) / 2f
         if (glass) {
-            // Jelly feel: the capsule stretches along the slide and squashes a little, peaking
-            // mid-way (spring progress 0..1), and grows slightly while pressed.
-            var drawLeft = left
-            var drawTop = top
-            var drawWidth = width
-            var drawHeight = height
-            if (hasFrom) {
-                val bump = (4f * t * (1f - t)).coerceAtLeast(0f)
-                val stretch = bump * min(0.10f + 0.04f * (travel / width), 0.30f)
-                drawWidth = width * (1f + stretch)
-                drawHeight = height * (1f - 0.4f * stretch)
-                drawLeft = left - (drawWidth - width) / 2f
-                drawTop = top + (height - drawHeight) / 2f
-            }
-            if (pressOnSelected) {
-                val grow = 1f + 0.09f * pressValue
-                val grownWidth = drawWidth * grow
-                val grownHeight = drawHeight * grow
-                drawLeft -= (grownWidth - drawWidth) / 2f
-                drawTop -= (grownHeight - drawHeight) / 2f
-                drawWidth = grownWidth
-                drawHeight = grownHeight
-            }
-            drawGlassSelectionPill(drawLeft, drawTop, drawWidth, drawHeight, lift = if (pressOnSelected) pressValue else 0f)
+            // Android drawJellyPill / jellyPillPath: the item rect scaled about its centre by
+            // (pillScaleX, pillScaleY), corners scaled the same way.
+            val drawWidth = width * scaleX
+            val drawHeight = height * scaleY
+            drawGlassSelectionPill(
+                left = left + (width - drawWidth) / 2f,
+                top = top + (height - drawHeight) / 2f,
+                width = drawWidth,
+                height = drawHeight,
+                radiusX = radius * scaleX,
+                radiusY = radius * scaleY,
+            )
             return
         }
         drawRoundRect(
@@ -658,13 +822,19 @@ private class NavPillState(private val scope: CoroutineScope) {
 }
 
 /** The lighter glass capsule behind the selected tab: pale fill, top gloss and a lit rim. */
-private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Float, height: Float, lift: Float) {
-    val radius = min(width, height) / 2f
+private fun DrawScope.drawGlassSelectionPill(
+    left: Float,
+    top: Float,
+    width: Float,
+    height: Float,
+    radiusX: Float,
+    radiusY: Float,
+) {
     drawRoundRect(
-        color = Color.White.copy(alpha = (0.14f + 0.08f * lift).coerceIn(0f, 1f)),
+        color = Color.White.copy(alpha = 0.14f),
         topLeft = Offset(left, top),
         size = Size(width, height),
-        cornerRadius = CornerRadius(radius, radius),
+        cornerRadius = CornerRadius(radiusX, radiusY),
     )
     drawRoundRect(
         brush = Brush.verticalGradient(
@@ -674,7 +844,7 @@ private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Flo
         ),
         topLeft = Offset(left, top),
         size = Size(width, height),
-        cornerRadius = CornerRadius(radius, radius),
+        cornerRadius = CornerRadius(radiusX, radiusY),
     )
     val rimWidth = 0.75.dp.toPx()
     drawRoundRect(
@@ -689,7 +859,10 @@ private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Flo
         ),
         topLeft = Offset(left + rimWidth / 2f, top + rimWidth / 2f),
         size = Size(width - rimWidth, height - rimWidth),
-        cornerRadius = CornerRadius(radius - rimWidth / 2f),
+        cornerRadius = CornerRadius(
+            (radiusX - rimWidth / 2f).coerceAtLeast(0f),
+            (radiusY - rimWidth / 2f).coerceAtLeast(0f),
+        ),
         style = Stroke(rimWidth),
     )
 }
@@ -751,7 +924,7 @@ private class NuvioNavigationBarScopeImpl(
             label = "nav_icon_color",
         )
 
-        val itemBounds = remember { NavItemBounds() }
+        val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
             if (selected) pillState.onItemSelected(itemBounds)
@@ -766,6 +939,18 @@ private class NuvioNavigationBarScopeImpl(
                         val bounds = coordinates.boundsInParent()
                         pillState.onItemPlaced(itemBounds, bounds.left, bounds.top, bounds.width, bounds.height)
                     }
+                    .then(
+                        if (glass) {
+                            // Android: the cells under the capsule swell with it (contentScale).
+                            Modifier.graphicsLayer {
+                                val contentScale = pillState.contentScaleFor(itemBounds)
+                                scaleX = contentScale
+                                scaleY = contentScale
+                            }
+                        } else {
+                            Modifier
+                        },
+                    )
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
                     .selectable(
                         selected = selected,
@@ -805,7 +990,7 @@ private class NuvioNavigationBarScopeImpl(
             label = "nav_icon_color",
         )
 
-        val itemBounds = remember { NavItemBounds() }
+        val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
             if (selected) pillState.onItemSelected(itemBounds)
@@ -820,6 +1005,18 @@ private class NuvioNavigationBarScopeImpl(
                         val bounds = coordinates.boundsInParent()
                         pillState.onItemPlaced(itemBounds, bounds.left, bounds.top, bounds.width, bounds.height)
                     }
+                    .then(
+                        if (glass) {
+                            // Android: the cells under the capsule swell with it (contentScale).
+                            Modifier.graphicsLayer {
+                                val contentScale = pillState.contentScaleFor(itemBounds)
+                                scaleX = contentScale
+                                scaleY = contentScale
+                            }
+                        } else {
+                            Modifier
+                        },
+                    )
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
                     .selectable(
                         selected = selected,
@@ -857,7 +1054,7 @@ private class NuvioNavigationBarScopeImpl(
             label = "nav_icon_color",
         )
 
-        val itemBounds = remember { NavItemBounds() }
+        val itemBounds = remember { pillState.newItemBounds() }
         SideEffect {
             itemBounds.selected = selected
             if (selected) pillState.onItemSelected(itemBounds)
@@ -872,6 +1069,18 @@ private class NuvioNavigationBarScopeImpl(
                         val bounds = coordinates.boundsInParent()
                         pillState.onItemPlaced(itemBounds, bounds.left, bounds.top, bounds.width, bounds.height)
                     }
+                    .then(
+                        if (glass) {
+                            // Android: the cells under the capsule swell with it (contentScale).
+                            Modifier.graphicsLayer {
+                                val contentScale = pillState.contentScaleFor(itemBounds)
+                                scaleX = contentScale
+                                scaleY = contentScale
+                            }
+                        } else {
+                            Modifier
+                        },
+                    )
                     .clip(RoundedCornerShape(NuvioTokens.Radius.full))
                     .selectable(
                         selected = selected,
