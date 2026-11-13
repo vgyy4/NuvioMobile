@@ -563,7 +563,8 @@ object DownloadsRepository {
      *   re-attaches to it ([reattachLeader]).
      * The record keeps the source details, subtitle choice and file of the original and gets this
      * profile's own id and content details. Subtitles and skip times saved next to the file are
-     * found by the file's location, so they are shared too (only what the original saves exists).
+     * found by the file's location, so they are shared too; the subtitle languages this profile wants
+ * are added next to the file when the download is finished ([topUpSharedSubtitles]).
      * An earlier record of this profile for the same content is replaced. Returns null, changing
      * nothing, when the candidate's finished file is gone.
      */
@@ -625,10 +626,16 @@ object DownloadsRepository {
             updatedAtEpochMs = now,
             sharedFromDownloadId = if (candidate.isComplete) null else source.id,
             sharedFromProfileId = if (candidate.isComplete) null else candidate.profileId,
+            // This profile's own subtitle choice (its remembered languages, its add-ons): the files
+            // are small and saved next to the shared video, so both profiles end up with them.
+            downloadSubtitles = true,
+            subtitleLanguages = _selectedSubtitleLanguages.value?.toList(),
+            subtitleRequests = addonSubtitleRequests(type = contentType, videoId = videoId, extras = null),
         )
         currentItems.add(0, linked)
         publish(currentItems)
         persist()
+        if (candidate.isComplete) topUpSharedSubtitles(linked)
         promotion?.let { handOverToFollower(it) }
         if (!candidate.isComplete) {
             addFollowerRef(source.id, DownloadRef(ProfileRepository.activeProfileId, linked.id))
@@ -637,6 +644,14 @@ object DownloadsRepository {
             }
         }
         return DownloadEnqueueResult.SharedExisting
+    }
+
+    /** Adds the subtitle languages this profile wants to the folder next to a video that is shared with other profiles. */
+    private fun topUpSharedSubtitles(item: DownloadItem) {
+        val uri = playableLocalFileUri(item) ?: return
+        p2pScope.launch {
+            runCatching { DownloadSubtitles.prepare(item, uri, topUp = true) }
+        }
     }
 
     // ---- Following a running download of another profile ------------------------------------
@@ -841,6 +856,7 @@ object DownloadsRepository {
     ) {
         val refs = followerIndex[leaderId] ?: return
         var finished = false
+        val completedFollowers = mutableListOf<DownloadItem>()
         for (ref in refs) {
             mutateItemIn(ref.profileId, ref.itemId, persistChange) { current ->
                 if (current.sharedFromDownloadId != leaderId) {
@@ -851,6 +867,7 @@ object DownloadsRepository {
                     if (updated.status == DownloadStatus.Completed) {
                         finished = true
                         updated.copy(sharedFromDownloadId = null, sharedFromProfileId = null)
+                            .also(completedFollowers::add)
                     } else {
                         updated
                     }
@@ -858,6 +875,8 @@ object DownloadsRepository {
             }
         }
         if (finished) followerIndex = followerIndex - leaderId
+        // Each finished follower adds the subtitle languages it asked for next to the shared video.
+        completedFollowers.forEach(::topUpSharedSubtitles)
     }
 
     /** Copies the state of [leader] (status, bytes, file) to its followers. Finished followers stay as they are. */

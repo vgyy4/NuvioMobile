@@ -14,6 +14,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -23,16 +25,31 @@ import kotlinx.serialization.json.Json
 
 internal object DownloadSubtitles {
     private val json = Json { ignoreUnknownKeys = true }
+    private val prepareLock = Mutex()
 
-    suspend fun prepare(item: DownloadItem, localVideoUri: String): Unit = withContext(Dispatchers.Default) {
+    /**
+     * Saves the subtitles of [item] next to the downloaded video. Subtitles that are already saved
+     * are kept; with [topUp] a finished set is looked at again, so languages another profile that
+     * shares this file asked for are added to the same folder (both profiles then have them).
+     */
+    suspend fun prepare(
+        item: DownloadItem,
+        localVideoUri: String,
+        topUp: Boolean = false,
+    ): Unit = withContext(Dispatchers.Default) {
         // Skip times are saved with every download, whatever the subtitle choice is.
         DownloadSkipTimes.prepare(item, localVideoUri)
         // The user chose not to download subtitles for this item.
         if (!item.downloadSubtitles) return@withContext
+        // Profiles share one folder per video: one writer at a time keeps manifest.json whole.
+        prepareLock.withLock { saveSubtitles(item, localVideoUri, topUp) }
+    }
+
+    private suspend fun saveSubtitles(item: DownloadItem, localVideoUri: String, topUp: Boolean) {
         val storage = DownloadSubtitleStorage(localVideoUri)
         val manifest = readManifest(storage)
         val saved = manifest.tracks.filter { storage.localFileUri(it.fileName) != null }.toMutableList()
-        if (manifest.complete && saved.size == manifest.tracks.size) return@withContext
+        if (!topUp && manifest.complete && saved.size == manifest.tracks.size) return
         var nextFileIndex = (saved.maxOfOrNull { it.fileName.substringBefore('.').toIntOrNull() ?: -1 } ?: -1) + 1
         // Subtitles found when the download was queued, plus what the add-ons offer now. Filtered
         // with the same grouping as the download options, so what was ticked there is saved here.
@@ -68,7 +85,6 @@ internal object DownloadSubtitles {
         runCatching {
             storage.write("manifest.json", json.encodeToString(SubtitleManifest(complete = true, tracks = saved)))
         }
-        Unit
     }
 
     /**
