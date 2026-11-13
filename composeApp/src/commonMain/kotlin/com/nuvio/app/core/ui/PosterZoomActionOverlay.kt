@@ -267,7 +267,9 @@ fun NuvioPosterZoomActionOverlay(
             ?.takeIf { it.height > 0f }
             ?.let { it.width / it.height }
             ?: 0.675f
-        val aspect = anchorAspect.coerceIn(0.35f, 2.4f)
+        // Wide cards (list-style episode rows) keep their own shape; a tighter clamp stretched the
+        // lifted copy of the card to fit it.
+        val aspect = anchorAspect.coerceIn(0.35f, 6f)
         val maxPosterWidth = if (aspect >= 1f) maxWidth * 0.8f else maxWidth * 0.6f
         val posterHeight = min(maxPosterWidth / aspect, maxHeight * 0.44f)
         val posterWidth = posterHeight * aspect

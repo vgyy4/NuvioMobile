@@ -112,6 +112,9 @@ fun DetailSeriesContent(
     onEpisodeClick: ((MetaVideo) -> Unit)? = null,
     onEpisodeLongPress: ((MetaVideo) -> Unit)? = null,
     onSeasonLongPress: ((Int) -> Unit)? = null,
+    // The Horizontal cards always hand their bounds to the long-press overlay; the List cards only
+    // do so when asked (the details screen opens a bottom sheet for them instead).
+    liftEpisodesOnLongPress: Boolean = false,
 ) {
     val hasVideos = meta.videos.isNotEmpty()
     if (meta.type != "series" && !hasVideos) return
@@ -263,6 +266,7 @@ fun DetailSeriesContent(
                                     episodeRatingsVisibility = episodeRatingsVisibility,
                                     blurUnwatchedEpisodes = blurUnwatchedEpisodes,
                                     sizing = sizing,
+                                    liftOnLongPress = liftEpisodesOnLongPress,
                                     onClick = { onEpisodeClick?.invoke(episode) },
                                     onLongPress = { onEpisodeLongPress?.invoke(episode) },
                                 )
@@ -1182,6 +1186,7 @@ private fun EpisodeListCard(
     blurUnwatchedEpisodes: Boolean,
     sizing: SeriesContentSizing,
     modifier: Modifier = Modifier,
+    liftOnLongPress: Boolean = false,
     onClick: (() -> Unit)? = null,
     onLongPress: (() -> Unit)? = null,
 ) {
@@ -1192,10 +1197,23 @@ private fun EpisodeListCard(
             ?.let(::formatEpisodeRating)
     }
     val formattedDate = remember(video.released) { video.released?.let { formatReleaseDateForDisplay(it) } }
+    // Outside the clip, background and border, so the card that lifts into the long-press overlay
+    // is the whole card and not just its content.
+    val liftModifier = if (liftOnLongPress) {
+        Modifier.posterCardClickable(
+            onClick = { onClick?.invoke() },
+            onLongClick = onLongPress,
+            zoomImageUrl = video.thumbnail ?: fallbackImage,
+            zoomCornerRadius = cornerRadius,
+        )
+    } else {
+        Modifier
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(sizing.cardHeight)
+            .then(liftModifier)
             .clip(cardShape)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
             .border(
@@ -1203,10 +1221,16 @@ private fun EpisodeListCard(
                 color = Color.White.copy(alpha = 0.1f),
                 shape = cardShape,
             )
-            .combinedClickable(
-                enabled = onClick != null || onLongPress != null,
-                onClick = { onClick?.invoke() },
-                onLongClick = onLongPress,
+            .then(
+                if (liftOnLongPress) {
+                    Modifier
+                } else {
+                    Modifier.combinedClickable(
+                        enabled = onClick != null || onLongPress != null,
+                        onClick = { onClick?.invoke() },
+                        onLongClick = onLongPress,
+                    )
+                },
             ),
     ) {
         Row(
