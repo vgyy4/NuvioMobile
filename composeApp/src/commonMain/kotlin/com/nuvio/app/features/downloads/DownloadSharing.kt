@@ -8,6 +8,21 @@ import com.nuvio.app.features.streams.StreamItem
  * Every profile keeps its own list of downloads, but all files live in one shared folder. Several
  * records (in different profiles) may therefore point to the same `fileName`. A file, its partial
  * file, its subtitles and its skip times may only be deleted when no other record points to it.
+ *
+ * Invariants that [DownloadsRepository] keeps:
+ * - Identity: the content is `DownloadItem.logicalContentKey`, a physical file is its `fileName`
+ *   (it contains a download id, so different downloads never collide). Watch progress and watched
+ *   state are not part of the downloads and stay per profile.
+ * - Deleting: every delete, replace or cancel first asks [isFileReferencedElsewhere]; when another
+ *   record still points to the file only the record goes. Platform clean-ups that delete files on
+ *   their own (orphan sweeps) only touch partial files, resume data and subtitle folders of file
+ *   names that no profile knows.
+ * - Transfers: at most one record per file name owns a transfer (the leader, `sharedFromDownloadId`
+ *   null). Followers (`sharedFromDownloadId` set) have no handle, never call the platform downloader
+ *   and are never restored on their own when a list is loaded. They are re-pointed together when
+ *   leadership changes, so the platform's per-file-name bookkeeping (Android's transfer store, iOS'
+ *   background tasks and resume data) only ever sees one active owner of a file name.
+ * - Disk budget: a torrent only reserves space while it runs, and only leaders run.
  */
 
 /**
