@@ -478,7 +478,9 @@ fun NuvioNavigationBar(
                 Box(
                     modifier = Modifier
                         .matchParentSize()
-                        .graphicsLayer()
+                        // Glass: no own layer, so the swollen capsule is never culled at the layer
+                        // bounds; it may draw a few dp past the bar on every side (like Android).
+                        .then(if (glass) Modifier else Modifier.graphicsLayer())
                         .drawBehind { with(pillState) { drawSelectionPill(selectedPillColor, glass) } },
                 )
                 Row(
@@ -584,7 +586,6 @@ private class NavPillState(private val scope: CoroutineScope) {
     private val velocity = GlassSpring(0.0, 300.0, 0.5)
     private val press = GlassSpring(0.0, 1000.0, 1.0)
     private val shapeX = GlassSpring(1.0, 250.0, 0.6)
-    private val shapeY = GlassSpring(1.0, 250.0, 0.7)
     private val distortionDamping = 18.0 / (2 * sqrt(240.0 * 0.9))
     private val trackPress = GlassSpring(1.0, 240.0 / 0.9, distortionDamping)
     private var pressed = false
@@ -596,10 +597,15 @@ private class NavPillState(private val scope: CoroutineScope) {
     /** Set by the bar: the tap feel below is only for the glass bar; the classic bar is unchanged. */
     var glassMode = false
 
-    /** Capsule scale (Android `pillScaleX/Y`): shape spring divided/multiplied by the speed term. */
+    /** Capsule width scale (Android `pillScaleX`): shape spring divided by the speed (stretch) term. */
     var pillScaleX by mutableFloatStateOf(1f)
         private set
-    var pillScaleY by mutableFloatStateOf(1f)
+
+    /**
+     * Pure swell (shape spring - 1, no velocity term). The capsule grows by `width * pillSwell / 2`
+     * outward on every side, left/right and top/bottom alike.
+     */
+    var pillSwell by mutableFloatStateOf(0f)
         private set
 
     /** Scale of the content under the capsule (Android `contentScale`, 1 + 0.2 * press). */
@@ -729,7 +735,7 @@ private class NavPillState(private val scope: CoroutineScope) {
 
     private fun isRunning(): Boolean =
         pressed || releasePending || !velocity.isAtRest(0.0) || !press.isAtRest(0.0) ||
-            !shapeX.isAtRest(1.0) || !shapeY.isAtRest(1.0) || !trackPress.isAtRest(1.0)
+            !shapeX.isAtRest(1.0) || !trackPress.isAtRest(1.0)
 
     /** Android `JellyMotion.advance` + `publish`, for the springs that are not the slide itself. */
     private fun advance(seconds: Double) {
@@ -746,11 +752,10 @@ private class NavPillState(private val scope: CoroutineScope) {
         }
         press.advance(pressTarget, delta)
         shapeX.advance(shapeTarget, delta)
-        shapeY.advance(shapeTarget, delta)
         trackPress.advance(if (pressed) 1.025 else 1.0, delta)
         val speed = velocity.value / 10
         pillScaleX = (shapeX.value / (1 - (speed * 0.75).coerceIn(-0.2, 0.2))).toFloat()
-        pillScaleY = (shapeY.value * (1 - (speed * 0.25).coerceIn(-0.2, 0.2))).toFloat()
+        pillSwell = (shapeX.value - 1.0).toFloat()
         contentScale = (1 + 0.2 * press.value).toFloat()
         trackScale = trackPress.value.toFloat()
     }
@@ -781,7 +786,7 @@ private class NavPillState(private val scope: CoroutineScope) {
         layoutTick
         val t = progress.value
         val scaleX = pillScaleX
-        val scaleY = pillScaleY
+        val swell = pillSwell
         val current = target ?: return
         if (!current.placed) return
         if (!glass && !current.selected) return
@@ -798,17 +803,19 @@ private class NavPillState(private val scope: CoroutineScope) {
         if (width <= 0f || height <= 0f) return
         val radius = min(width, height) / 2f
         if (glass) {
-            // Android drawJellyPill / jellyPillPath: the item rect scaled about its centre by
-            // (pillScaleX, pillScaleY), corners scaled the same way.
+            // Android jellyPillPath: horizontally the item width times pillScaleX (swell plus the
+            // velocity stretch); vertically the resting height plus the SAME outward growth in px
+            // as each side (width * swell / 2), never squashed. Fully rounded ends.
+            val grow = width * swell / 2f
             val drawWidth = width * scaleX
-            val drawHeight = height * scaleY
+            val drawHeight = height + 2f * grow
+            val cornerRadius = min(drawWidth, drawHeight) / 2f
             drawGlassSelectionPill(
                 left = left + (width - drawWidth) / 2f,
-                top = top + (height - drawHeight) / 2f,
+                top = top - grow,
                 width = drawWidth,
                 height = drawHeight,
-                radiusX = radius * scaleX,
-                radiusY = radius * scaleY,
+                cornerRadius = cornerRadius,
             )
             return
         }
@@ -827,14 +834,13 @@ private fun DrawScope.drawGlassSelectionPill(
     top: Float,
     width: Float,
     height: Float,
-    radiusX: Float,
-    radiusY: Float,
+    cornerRadius: Float,
 ) {
     drawRoundRect(
         color = Color.White.copy(alpha = 0.14f),
         topLeft = Offset(left, top),
         size = Size(width, height),
-        cornerRadius = CornerRadius(radiusX, radiusY),
+        cornerRadius = CornerRadius(cornerRadius, cornerRadius),
     )
     drawRoundRect(
         brush = Brush.verticalGradient(
@@ -844,7 +850,7 @@ private fun DrawScope.drawGlassSelectionPill(
         ),
         topLeft = Offset(left, top),
         size = Size(width, height),
-        cornerRadius = CornerRadius(radiusX, radiusY),
+        cornerRadius = CornerRadius(cornerRadius, cornerRadius),
     )
     val rimWidth = 0.75.dp.toPx()
     drawRoundRect(
@@ -859,10 +865,7 @@ private fun DrawScope.drawGlassSelectionPill(
         ),
         topLeft = Offset(left + rimWidth / 2f, top + rimWidth / 2f),
         size = Size(width - rimWidth, height - rimWidth),
-        cornerRadius = CornerRadius(
-            (radiusX - rimWidth / 2f).coerceAtLeast(0f),
-            (radiusY - rimWidth / 2f).coerceAtLeast(0f),
-        ),
+        cornerRadius = CornerRadius((cornerRadius - rimWidth / 2f).coerceAtLeast(0f)),
         style = Stroke(rimWidth),
     )
 }
