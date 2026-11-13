@@ -69,6 +69,13 @@ object DownloadsRepository {
     private val previewedSubtitles = MutableStateFlow<Map<String, PreviewedSubtitles>>(emptyMap())
 
     private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
+
+    /**
+     * The profile each running download belongs to. A download keeps running when another profile
+     * is selected; its progress and result are then written to its own profile's list instead of
+     * the active one.
+     */
+    private val handleOwners = mutableMapOf<String, Int>()
     private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     // Limits how many torrents download at once; the rest wait their turn (first come, first served).
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
@@ -565,7 +572,13 @@ object DownloadsRepository {
         var shouldPersistNormalized = false
         val normalized = DownloadsCodec.decodeItems(payload)
             .map { item ->
-                val statusNormalized = DownloadsPlatformDownloader.restoreItem(item)
+                // A download that is running right now (it kept going while another profile was
+                // active) is not restored: restoring would mark a running torrent download as paused.
+                val statusNormalized = if (item.id in activeHandles) {
+                    item
+                } else {
+                    DownloadsPlatformDownloader.restoreItem(item)
+                }
 
                 val localUriNormalized = normalizeCompletedLocalFileUri(statusNormalized)
                 if (localUriNormalized != item) {
@@ -635,6 +648,7 @@ object DownloadsRepository {
         )
 
         activeHandles[item.id] = handle
+        handleOwners[item.id] = ProfileRepository.activeProfileId
     }
 
     // ---- Torrent (P2P) downloads -------------------------------------------------------------
@@ -652,6 +666,7 @@ object DownloadsRepository {
     private fun startP2pDownload(item: DownloadItem) {
         val handle = P2pDownloadHandle(item.id)
         activeHandles[item.id] = handle
+        handleOwners[item.id] = ProfileRepository.activeProfileId
         handle.job = p2pScope.launch {
             try {
                 runP2pDownload(item, handle)
@@ -838,6 +853,11 @@ object DownloadsRepository {
         persistChange: Boolean = true,
         transform: (DownloadItem) -> DownloadItem,
     ) {
+        val owner = handleOwners[downloadId]
+        if (owner != null && owner != ProfileRepository.activeProfileId) {
+            mutateItemOfOtherProfile(owner, downloadId, persistChange, transform)
+            return
+        }
         var changed = false
         val updated = _uiState.value.items.map { item ->
             if (item.id == downloadId) {
@@ -852,6 +872,37 @@ object DownloadsRepository {
             publish(updated)
             if (persistChange) persist()
         }
+    }
+
+    /** Updates a running download of a profile that is not the active one, in that profile's saved list. */
+    private fun mutateItemOfOtherProfile(
+        profileId: Int,
+        downloadId: String,
+        persistChange: Boolean,
+        transform: (DownloadItem) -> DownloadItem,
+    ) {
+        if (!persistChange) return
+        val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
+        if (payload.isEmpty()) return
+        var changed = false
+        val updated = DownloadsCodec.decodeItems(payload).map { item ->
+            if (item.id == downloadId) {
+                changed = true
+                transform(item)
+            } else {
+                item
+            }
+        }
+        if (!changed) return
+        DownloadsStorage.savePayload(
+            profileId,
+            DownloadsCodec.encode(
+                updated,
+                DownloadsCodec.decodeSelectedLanguages(payload),
+                DownloadsCodec.decodeDeselectedLanguages(payload),
+                DownloadsCodec.decodeOfflineDownloadsHome(payload),
+            ),
+        )
     }
 
     private fun replaceItem(item: DownloadItem) {
