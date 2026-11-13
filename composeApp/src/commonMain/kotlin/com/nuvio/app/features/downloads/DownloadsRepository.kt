@@ -3,6 +3,7 @@ package com.nuvio.app.features.downloads
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
+import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.p2p.P2pSettingsRepository
 import com.nuvio.app.features.p2p.P2pDownloadStream
 import com.nuvio.app.features.p2p.P2pStreamRequest
@@ -520,6 +521,24 @@ object DownloadsRepository {
         persist()
     }
 
+    /**
+     * File names of the downloads of EVERY profile (all profiles share one downloads folder but each
+     * keeps its own list). Looking only at the active profile would make the unfinished downloads
+     * of the other profiles look like leftovers and delete them.
+     */
+    private fun allProfilesKnownFileNames(): Set<String> {
+        val names = _uiState.value.items.mapTo(mutableSetOf()) { it.fileName }
+        val profileIds = ProfileRepository.state.value.profiles.map { it.profileIndex }
+        for (profileId in profileIds) {
+            val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
+            if (payload.isEmpty()) continue
+            runCatching { DownloadsCodec.decodeItems(payload) }
+                .getOrNull()
+                ?.forEach { names += it.fileName }
+        }
+        return names
+    }
+
     private fun loadFromDisk() {
         _hasUnseenCompleted.value = false
         hasLoaded = true
@@ -528,9 +547,7 @@ object DownloadsRepository {
         // Delayed and age-checked so a download started right now is never touched.
         p2pScope.launch {
             delay(ORPHAN_SWEEP_DELAY_MS)
-            DownloadsPlatformDownloader.removeOrphanedPartialFiles(
-                _uiState.value.items.mapTo(mutableSetOf()) { it.fileName },
-            )
+            DownloadsPlatformDownloader.removeOrphanedPartialFiles(allProfilesKnownFileNames())
         }
         val payload = DownloadsStorage.loadPayload().orEmpty().trim()
         if (payload.isEmpty()) {
