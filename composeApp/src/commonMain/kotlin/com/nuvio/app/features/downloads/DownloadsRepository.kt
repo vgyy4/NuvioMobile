@@ -628,8 +628,9 @@ object DownloadsRepository {
             sharedFromProfileId = if (candidate.isComplete) null else candidate.profileId,
             // This profile's own subtitle choice (its remembered languages, its add-ons): the files
             // are small and saved next to the shared video, so both profiles end up with them.
-            downloadSubtitles = true,
-            subtitleLanguages = _selectedSubtitleLanguages.value?.toList(),
+            // (nothing remembered = all languages; a remembered empty choice = no subtitles)
+            downloadSubtitles = _selectedSubtitleLanguages.value.let { it == null || it.isNotEmpty() },
+            subtitleLanguages = _selectedSubtitleLanguages.value?.toList().orEmpty(),
             subtitleRequests = addonSubtitleRequests(type = contentType, videoId = videoId, extras = null),
         )
         currentItems.add(0, linked)
