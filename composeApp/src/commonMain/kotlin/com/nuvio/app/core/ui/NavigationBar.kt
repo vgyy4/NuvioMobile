@@ -2,10 +2,13 @@ package com.nuvio.app.core.ui
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +59,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onPlaced
@@ -72,6 +77,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
+import kotlin.math.abs
 import kotlin.math.min
 
 /**
@@ -85,6 +91,12 @@ class NuvioNavBarScrollState {
         private set
 
     private var accumulatedDelta = 0f
+
+    /**
+     * When true the bar also expands as soon as a downward drag reaches the start of the content
+     * (nothing left to scroll up), so scrolling back to the top always leaves the compact state.
+     */
+    var expandsAtTop = false
 
     /** Call to expand (show labels) – e.g. when user scrolls back to top */
     fun expand() {
@@ -121,6 +133,15 @@ class NuvioNavBarScrollState {
 
             return Offset.Zero // Don't consume any scroll
         }
+
+        override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+            // Pulling down with nothing left to scroll: the content is at its start.
+            if (expandsAtTop && available.y > 0f && labelVisibility != 1f) {
+                labelVisibility = 1f
+                accumulatedDelta = 0f
+            }
+            return Offset.Zero
+        }
     }
 
     companion object {
@@ -131,6 +152,24 @@ class NuvioNavBarScrollState {
 @Composable
 fun rememberNuvioNavBarScrollState(): NuvioNavBarScrollState {
     return androidx.compose.runtime.remember { NuvioNavBarScrollState() }
+}
+
+/**
+ * Observes (never consumes) touches on the bar so the glass can react on touch-down. Runs in the
+ * Initial/Final passes, so taps, the profile long-press and drags reach their own handlers.
+ */
+private fun Modifier.glassPressFeedback(pillState: NavPillState): Modifier = pointerInput(pillState) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        pillState.onPress(down.position.x, down.position.y)
+        try {
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+            } while (event.changes.any { it.pressed })
+        } finally {
+            pillState.onRelease()
+        }
+    }
 }
 
 /**
@@ -215,16 +254,26 @@ fun NuvioNavigationBar(
     compactSize: Boolean = false,
     content: @Composable NuvioNavigationBarScope.() -> Unit,
 ) {
-    val labelFraction = animateFloatAsState(
-        targetValue = scrollState?.labelVisibility ?: 1f,
-        animationSpec = tween(
+    val glass = LocalNuvioGlassNavigationBar.current
+    // Compact <-> expanded (pill width, label height and fade). The glass bar uses a spring like the
+    // system bar's minimize animation; the value is clamped because a spring may overshoot and the
+    // label layout needs a non-negative fraction.
+    val labelSpec: AnimationSpec<Float> = if (glass) {
+        spring(dampingRatio = 0.9f, stiffness = 380f)
+    } else {
+        tween(
             durationMillis = NuvioTokens.Motion.sheetEnterMillis,
             easing = NuvioTokens.Motion.standard,
-        ),
+        )
+    }
+    val animatedLabelFraction = animateFloatAsState(
+        targetValue = scrollState?.labelVisibility ?: 1f,
+        animationSpec = labelSpec,
         label = "nav_label_alpha",
     )
-
-    val glass = LocalNuvioGlassNavigationBar.current
+    val labelFraction = remember(animatedLabelFraction) {
+        derivedStateOf { animatedLabelFraction.value.coerceIn(0f, 1f) }
+    }
     // The blur input is shrunk before blurring; a quarter-resolution input is indistinguishable
     // behind a ~30 dp blur and much cheaper on old GPUs (iPad Air 2).
     val blurInputScale = if (DevicePerformance.isLowEnd) HazeInputScale.Fixed(0.25f) else HazeInputScale.Auto
@@ -260,7 +309,18 @@ fun NuvioNavigationBar(
                 }
             }
             .fillMaxWidth()
-            .then(if (glass) Modifier.glassBarShadow() else Modifier)
+            .then(
+                if (glass) {
+                    // Draw-phase only: reads the press spring when the layer is drawn.
+                    Modifier.graphicsLayer {
+                        val scale = 1f + 0.025f * pillState.pressFraction
+                        scaleX = scale
+                        scaleY = scale
+                    }.then(Modifier.glassBarShadow())
+                } else {
+                    Modifier
+                },
+            )
             .clip(RoundedCornerShape(NuvioTokens.Radius.full))
             .then(
                 if (hazeState != null) {
@@ -297,7 +357,8 @@ fun NuvioNavigationBar(
                     .padding(
                         horizontal = NuvioTokens.Space.s6,
                         vertical = NuvioTokens.Space.s4,
-                    ),
+                    )
+                    .then(if (glass) Modifier.glassPressFeedback(pillState) else Modifier),
             ) {
                 // Own layer + draw-phase reads only: the slide invalidates this layer, never the
                 // blurred pill background or the items, and never recomposes anything.
@@ -317,6 +378,7 @@ fun NuvioNavigationBar(
                         labelFraction = labelFraction,
                         compactSize = compactSize,
                         pillState = pillState,
+                        glass = glass,
                     ).content()
                 }
             }
@@ -347,12 +409,35 @@ private class NavItemBounds {
  */
 private class NavPillState(private val scope: CoroutineScope) {
     private val progress = Animatable(1f)
+    private val press = Animatable(0f)
+    private var pressOnSelected = false
+    private var travel = 0f
     private var target: NavItemBounds? = null
     private var hasFrom = false
     private var fromLeft = 0f
     private var fromTop = 0f
     private var fromWidth = 0f
     private var fromHeight = 0f
+
+    /** 0 at rest, ~1 while a finger is down on the bar (a spring: may undershoot on release). */
+    val pressFraction: Float get() = press.value
+
+    /** Finger down at ([x], [y]) in the item row's coordinates. */
+    fun onPress(x: Float, y: Float) {
+        val current = target
+        pressOnSelected = current != null && current.placed &&
+            x >= current.left && x <= current.left + current.width &&
+            y >= current.top && y <= current.top + current.height
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            press.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 700f))
+        }
+    }
+
+    fun onRelease() {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            press.animateTo(0f, spring(dampingRatio = 0.5f, stiffness = 350f))
+        }
+    }
 
     /** Bumped when the selected item's bounds change so the pill follows it (e.g. label collapse). */
     private var layoutTick by mutableIntStateOf(0)
@@ -390,6 +475,7 @@ private class NavPillState(private val scope: CoroutineScope) {
             }
             hasFrom = true
             target = bounds
+            travel = abs(bounds.left - fromLeft)
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 progress.snapTo(0f)
                 progress.animateTo(
@@ -412,6 +498,8 @@ private class NavPillState(private val scope: CoroutineScope) {
         // Always read so the draw layer is observing both, whatever state the pill is in.
         layoutTick
         val t = progress.value
+        // Read before any early return so the layer keeps observing the press spring.
+        val pressValue = press.value
         val current = target ?: return
         if (!current.selected || !current.placed) return
         var left = current.left
@@ -427,7 +515,30 @@ private class NavPillState(private val scope: CoroutineScope) {
         if (width <= 0f || height <= 0f) return
         val radius = min(width, height) / 2f
         if (glass) {
-            drawGlassSelectionPill(left, top, width, height)
+            // Jelly feel: the capsule stretches along the slide and squashes a little, peaking
+            // mid-way (spring progress 0..1), and grows slightly while pressed.
+            var drawLeft = left
+            var drawTop = top
+            var drawWidth = width
+            var drawHeight = height
+            if (hasFrom) {
+                val bump = (4f * t * (1f - t)).coerceAtLeast(0f)
+                val stretch = bump * min(0.10f + 0.04f * (travel / width), 0.30f)
+                drawWidth = width * (1f + stretch)
+                drawHeight = height * (1f - 0.4f * stretch)
+                drawLeft = left - (drawWidth - width) / 2f
+                drawTop = top + (height - drawHeight) / 2f
+            }
+            if (pressOnSelected) {
+                val grow = 1f + 0.09f * pressValue
+                val grownWidth = drawWidth * grow
+                val grownHeight = drawHeight * grow
+                drawLeft -= (grownWidth - drawWidth) / 2f
+                drawTop -= (grownHeight - drawHeight) / 2f
+                drawWidth = grownWidth
+                drawHeight = grownHeight
+            }
+            drawGlassSelectionPill(drawLeft, drawTop, drawWidth, drawHeight, lift = if (pressOnSelected) pressValue else 0f)
             return
         }
         drawRoundRect(
@@ -440,10 +551,10 @@ private class NavPillState(private val scope: CoroutineScope) {
 }
 
 /** The lighter glass capsule behind the selected tab: pale fill, top gloss and a lit rim. */
-private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Float, height: Float) {
+private fun DrawScope.drawGlassSelectionPill(left: Float, top: Float, width: Float, height: Float, lift: Float) {
     val radius = min(width, height) / 2f
     drawRoundRect(
-        color = Color.White.copy(alpha = 0.14f),
+        color = Color.White.copy(alpha = (0.14f + 0.08f * lift).coerceIn(0f, 1f)),
         topLeft = Offset(left, top),
         size = Size(width, height),
         cornerRadius = CornerRadius(radius, radius),
@@ -512,6 +623,7 @@ private class NuvioNavigationBarScopeImpl(
     private val labelFraction: State<Float>,
     private val compactSize: Boolean,
     private val pillState: NavPillState,
+    private val glass: Boolean,
 ) : NuvioNavigationBarScope {
     private val iconSize = if (compactSize) 24.dp else 28.dp
     private val itemVerticalPadding = if (compactSize) 4.dp else NuvioTokens.Space.s6
@@ -565,7 +677,7 @@ private class NuvioNavigationBarScopeImpl(
                     contentDescription = contentDescription,
                     tint = if (selected) Color.White else iconColor.value,
                 )
-                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize)
+                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize, glass = glass)
             }
         }
     }
@@ -619,7 +731,7 @@ private class NuvioNavigationBarScopeImpl(
                     contentDescription = contentDescription,
                     tint = if (selected) Color.White else iconColor.value,
                 )
-                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize)
+                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize, glass = glass)
             }
         }
     }
@@ -668,7 +780,7 @@ private class NuvioNavigationBarScopeImpl(
                 } else {
                     content()
                 }
-                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize)
+                NavItemLabel(label = label, labelFraction = labelFraction, iconColor = iconColor, selected = selected, compactSize = compactSize, glass = glass)
             }
         }
     }
@@ -681,6 +793,7 @@ private fun NavItemLabel(
     iconColor: State<Color>,
     selected: Boolean,
     compactSize: Boolean,
+    glass: Boolean,
 ) {
     if (label == null) return
     val visible by remember(labelFraction) { derivedStateOf { labelFraction.value > 0f } }
@@ -700,7 +813,9 @@ private fun NavItemLabel(
                     placeable.placeRelative(0, gapPx)
                 }
             }
-            .graphicsLayer { alpha = labelFraction.value },
+            // Glass: the labels fade out ahead of the collapse and fade in late on expand, as in
+            // the system bar.
+            .graphicsLayer { alpha = if (glass) labelFraction.value * labelFraction.value else labelFraction.value },
     ) {
         Text(
             text = label,
