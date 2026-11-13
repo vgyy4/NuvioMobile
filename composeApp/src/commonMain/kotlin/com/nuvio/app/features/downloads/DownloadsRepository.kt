@@ -77,6 +77,13 @@ object DownloadsRepository {
      * the active one.
      */
     private val handleOwners = mutableMapOf<String, Int>()
+
+    /**
+     * Records (in any profile) that follow a running download of another profile, by the id of the
+     * download they follow. A follower has the same file name as its leader and never transfers
+     * anything: it mirrors the leader's progress and result. Replaced as a whole on every change.
+     */
+    private var followerIndex: Map<String, List<DownloadRef>> = emptyMap()
     private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     // Limits how many torrents download at once; the rest wait their turn (first come, first served).
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
@@ -102,6 +109,7 @@ object DownloadsRepository {
     fun clearLocalState() {
         activeHandles.values.forEach(DownloadsTaskHandle::cancel)
         activeHandles.clear()
+        followerIndex = emptyMap()
         hasLoaded = false
         _hasUnseenCompleted.value = false
         _selectedSubtitleLanguages.value = null
@@ -372,11 +380,13 @@ object DownloadsRepository {
         )
 
         var replacedExisting = false
+        var promotion: PendingPromotion? = null
         val currentItems = _uiState.value.items.toMutableList()
         val existing = currentItems.firstOrNull { it.logicalContentKey == logicalKey }
         if (existing != null) {
             replacedExisting = true
             activeHandles.remove(existing.id)?.cancel()
+            promotion = releaseFollowRelations(existing)
             deleteFilesUnlessShared(existing)
             currentItems.removeAll { it.id == existing.id }
         }
@@ -456,6 +466,7 @@ object DownloadsRepository {
         currentItems.add(0, item)
         publish(currentItems)
         persist()
+        promotion?.let { handOverToFollower(it) }
         startDownload(item)
 
         return if (replacedExisting) {
@@ -482,7 +493,7 @@ object DownloadsRepository {
             stream = stream,
             entries = otherProfileDownloads(),
             fileExists = { it.hasPlayableLocalFile() },
-            allowInProgress = false,
+            allowInProgress = true,
         )
     }
 
@@ -544,13 +555,17 @@ object DownloadsRepository {
     }
 
     /**
-     * Adds a record for the active profile that points to the same file as [candidate] (a finished
-     * download of another profile): nothing is transferred and no extra disk space is used. The
-     * record keeps the source details, subtitle choice and file of the original, and gets this
-     * profile's own id and content details. The subtitles and skip times saved next to the file are
-     * found by the file's location, so they are shared too (only what the original saved exists).
+     * Adds a record for the active profile that uses the same file as [candidate], a download of
+     * another profile: nothing is transferred twice and no extra disk space is used.
+     * - A finished download is linked: the new record is finished too and points to the file.
+     * - A running (or paused) download is followed: the new record mirrors its progress and result
+     *   (see [followerIndex]); if nothing in this app run drives that download, the app first
+     *   re-attaches to it ([reattachLeader]).
+     * The record keeps the source details, subtitle choice and file of the original and gets this
+     * profile's own id and content details. Subtitles and skip times saved next to the file are
+     * found by the file's location, so they are shared too (only what the original saves exists).
      * An earlier record of this profile for the same content is replaced. Returns null, changing
-     * nothing, when the candidate's file is gone.
+     * nothing, when the candidate's finished file is gone.
      */
     private fun shareOtherProfileDownload(
         candidate: OtherProfileDownload,
@@ -568,18 +583,23 @@ object DownloadsRepository {
         episodeThumbnail: String?,
     ): DownloadEnqueueResult? {
         val source = candidate.item
-        if (!candidate.isComplete) return null
-        val fileUri = DownloadsPlatformDownloader.resolveLocalFileUri(
-            localFileUri = source.localFileUri,
-            destinationFileName = source.fileName,
-        ) ?: return null
+        val fileUri: String? = if (candidate.isComplete) {
+            DownloadsPlatformDownloader.resolveLocalFileUri(
+                localFileUri = source.localFileUri,
+                destinationFileName = source.fileName,
+            ) ?: return null
+        } else {
+            null
+        }
 
         val now = DownloadsClock.nowEpochMs()
         val logicalKey = buildLogicalKey(parentMetaId, seasonNumber, episodeNumber)
+        var promotion: PendingPromotion? = null
         val currentItems = _uiState.value.items.toMutableList()
         val existing = currentItems.firstOrNull { it.logicalContentKey == logicalKey }
         if (existing != null) {
             activeHandles.remove(existing.id)?.cancel()
+            promotion = releaseFollowRelations(existing)
             deleteFilesUnlessShared(existing)
             currentItems.removeAll { it.id == existing.id }
         }
@@ -599,23 +619,273 @@ object DownloadsRepository {
             episodeTitle = episodeTitle,
             episodeThumbnail = episodeThumbnail,
             localFileUri = fileUri,
-            status = DownloadStatus.Completed,
+            status = if (candidate.isComplete) DownloadStatus.Completed else source.status,
             errorMessage = null,
             createdAtEpochMs = now,
             updatedAtEpochMs = now,
-            sharedFromDownloadId = null,
-            sharedFromProfileId = null,
+            sharedFromDownloadId = if (candidate.isComplete) null else source.id,
+            sharedFromProfileId = if (candidate.isComplete) null else candidate.profileId,
         )
         currentItems.add(0, linked)
         publish(currentItems)
         persist()
+        promotion?.let { handOverToFollower(it) }
+        if (!candidate.isComplete) {
+            addFollowerRef(source.id, DownloadRef(ProfileRepository.activeProfileId, linked.id))
+            if (leaderNeedsReattach(source.status, leaderHasLiveTransfer = source.id in activeHandles)) {
+                reattachLeader(candidate.profileId, source.id)
+            }
+        }
         return DownloadEnqueueResult.SharedExisting
+    }
+
+    // ---- Following a running download of another profile ------------------------------------
+
+    private fun addFollowerRef(leaderId: String, ref: DownloadRef) {
+        val current = followerIndex[leaderId].orEmpty()
+        if (ref in current) return
+        followerIndex = followerIndex + (leaderId to (current + ref))
+    }
+
+    private fun removeFollowerRef(leaderId: String, ref: DownloadRef) {
+        val remaining = followerIndex[leaderId].orEmpty() - ref
+        followerIndex = if (remaining.isEmpty()) followerIndex - leaderId else followerIndex + (leaderId to remaining)
+    }
+
+    /** Rebuilds [followerIndex] from the saved lists of every profile (the active one from memory). */
+    private fun rebuildFollowerIndex() {
+        val activeProfileId = ProfileRepository.activeProfileId
+        val index = mutableMapOf<String, List<DownloadRef>>()
+        for (profileId in profileIdsToScan()) {
+            val items: List<DownloadItem> = if (profileId == activeProfileId) {
+                _uiState.value.items
+            } else {
+                val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
+                if (payload.isEmpty()) emptyList() else DownloadsCodec.decodeItemsOrNull(payload).orEmpty()
+            }
+            for (item in items) {
+                val leaderId = item.sharedFromDownloadId ?: continue
+                index[leaderId] = index[leaderId].orEmpty() + DownloadRef(profileId, item.id)
+            }
+        }
+        followerIndex = index
+    }
+
+    /** The record [itemId] as saved in the list of [profileId], or null. */
+    private fun storedItem(profileId: Int, itemId: String): DownloadItem? {
+        val payload = DownloadsStorage.loadPayload(profileId).orEmpty().trim()
+        if (payload.isEmpty()) return null
+        return DownloadsCodec.decodeItemsOrNull(payload)?.firstOrNull { it.id == itemId }
+    }
+
+    /** A leader handing its running download to a follower, decided while it is being removed. */
+    private class PendingPromotion(
+        val plan: LeaderPromotion,
+        val previousLeaderId: String,
+        val startTransfer: Boolean,
+    )
+
+    /**
+     * Called before [item], a record of the ACTIVE profile, is removed (deleted or replaced), after
+     * its own transfer was cancelled. A follower just stops following. A running download that
+     * others follow must not die with its leader: returns the hand-over to run once the removal is
+     * saved ([handOverToFollower]); null when there is nothing to hand over.
+     */
+    private fun releaseFollowRelations(item: DownloadItem): PendingPromotion? {
+        val self = DownloadRef(ProfileRepository.activeProfileId, item.id)
+        item.sharedFromDownloadId?.let { removeFollowerRef(it, self) }
+        val followers = followerIndex[item.id].orEmpty()
+        if (followers.isEmpty()) return null
+        if (item.status == DownloadStatus.Completed) {
+            // Finished: nobody has to take over; whoever still follows is completed with it.
+            syncFollowersTo(item)
+            followerIndex = followerIndex - item.id
+            return null
+        }
+        val plan = planLeaderPromotion(followers, self)
+        if (plan == null) {
+            followerIndex = followerIndex - item.id
+            return null
+        }
+        return PendingPromotion(plan, item.id, startTransfer = item.status == DownloadStatus.Downloading)
+    }
+
+    private fun handOverToFollower(promotion: PendingPromotion) {
+        promoteFollower(
+            newLeader = promotion.plan.newLeader,
+            others = promotion.plan.remainingFollowers,
+            previousLeaderId = promotion.previousLeaderId,
+            startTransfer = promotion.startTransfer,
+        )
+    }
+
+    /**
+     * Makes the record [newLeader] stand on its own and lead the download that [others] then follow.
+     * With [startTransfer] it starts the transfer itself, in its own profile (the partial file has
+     * the same name, so it resumes where the last leader stopped); otherwise it keeps the (paused or
+     * failed) status it mirrored. A record that is gone is skipped in favour of the next one.
+     * Returns false if nobody could take over.
+     */
+    private fun promoteFollower(
+        newLeader: DownloadRef,
+        others: List<DownloadRef>,
+        previousLeaderId: String,
+        startTransfer: Boolean,
+    ): Boolean {
+        var promoted: DownloadItem? = null
+        mutateItemIn(newLeader.profileId, newLeader.itemId, persistChange = true) { current ->
+            val standalone = current.copy(sharedFromDownloadId = null, sharedFromProfileId = null)
+            val updated = if (current.status == DownloadStatus.Completed) {
+                standalone
+            } else {
+                standalone.copy(
+                    status = if (startTransfer) DownloadStatus.Downloading else current.status,
+                    errorMessage = if (startTransfer) null else current.errorMessage,
+                    localFileUri = null,
+                    updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                )
+            }
+            promoted = updated
+            updated
+        }
+        followerIndex = followerIndex - previousLeaderId
+        val leader = promoted
+        if (leader == null) {
+            val next = others.firstOrNull() ?: return false
+            return promoteFollower(next, others.drop(1), previousLeaderId, startTransfer)
+        }
+
+        val now = DownloadsClock.nowEpochMs()
+        for (other in others) {
+            mutateItemIn(other.profileId, other.itemId, persistChange = true) { current ->
+                if (current.status == DownloadStatus.Completed) {
+                    current
+                } else {
+                    current.copy(
+                        sharedFromDownloadId = leader.id,
+                        sharedFromProfileId = newLeader.profileId,
+                        status = leader.status,
+                        errorMessage = leader.errorMessage,
+                        downloadedBytes = leader.downloadedBytes,
+                        totalBytes = leader.totalBytes,
+                        localFileUri = null,
+                        updatedAtEpochMs = now,
+                    )
+                }
+            }
+        }
+        if (others.isNotEmpty()) followerIndex = followerIndex + (leader.id to others)
+        if (startTransfer && leader.status == DownloadStatus.Downloading) {
+            startDownload(leader, ownerProfileId = newLeader.profileId)
+        }
+        return true
+    }
+
+    /**
+     * The leader [leaderId] of [profileId] is saved as downloading but nothing in this app run
+     * drives it (the app was restarted while it ran). The platform may still be transferring it, so
+     * the leader's own transfer is re-attached exactly like when its profile loads: it keeps its
+     * identity and its followers keep following. What the platform reports (finished, paused, still
+     * running) is saved and passed on to the followers.
+     */
+    private fun reattachLeader(profileId: Int, leaderId: String) {
+        if (leaderId in activeHandles) return
+        val leader = storedItem(profileId, leaderId) ?: return
+        if (leader.status != DownloadStatus.Downloading) return
+        val restored = DownloadsPlatformDownloader.restoreItem(leader)
+        if (restored != leader) mutateItemIn(profileId, leaderId, persistChange = true) { restored }
+        syncFollowersTo(restored)
+        if (restored.status == DownloadStatus.Downloading) startDownload(restored, ownerProfileId = profileId)
+    }
+
+    /**
+     * Resume or retry on [follower], a record of the active profile: if nothing really runs its
+     * leader any more, this record takes over the download (the former leader and the other
+     * followers then follow it). A leader that is running keeps going: nothing to resume.
+     */
+    private fun takeOverFromLeader(follower: DownloadItem) {
+        val leaderId = follower.sharedFromDownloadId ?: return
+        if (leaderId in activeHandles) return
+        val self = DownloadRef(ProfileRepository.activeProfileId, follower.id)
+        val others = followerIndex[leaderId].orEmpty().filter { it != self } +
+            listOfNotNull(follower.sharedFromProfileId?.let { DownloadRef(it, leaderId) })
+        promoteFollower(self, others, leaderId, startTransfer = true)
+    }
+
+    /** Pause on [follower]: pauses the download it follows, which every follower mirrors. */
+    private fun pauseLeaderOf(follower: DownloadItem) {
+        val leaderId = follower.sharedFromDownloadId ?: return
+        activeHandles.remove(leaderId)?.cancel()
+        mutateItem(leaderId, ownerProfileId = follower.sharedFromProfileId) { current ->
+            if (current.status != DownloadStatus.Downloading) {
+                current
+            } else {
+                current.copy(
+                    status = DownloadStatus.Paused,
+                    updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    /**
+     * Applies [transform] to every follower of [leaderId], in the active profile's list (published)
+     * or in the saved list of another profile. Followers that end up finished stop following.
+     * Progress ticks ([persistChange] false) only reach followers of the active profile.
+     */
+    private fun applyToFollowers(
+        leaderId: String,
+        persistChange: Boolean,
+        transform: (DownloadItem) -> DownloadItem,
+    ) {
+        val refs = followerIndex[leaderId] ?: return
+        var finished = false
+        for (ref in refs) {
+            mutateItemIn(ref.profileId, ref.itemId, persistChange) { current ->
+                if (current.sharedFromDownloadId != leaderId) {
+                    // No longer follows this download (the index entry is stale): leave it alone.
+                    current
+                } else {
+                    val updated = transform(current)
+                    if (updated.status == DownloadStatus.Completed) {
+                        finished = true
+                        updated.copy(sharedFromDownloadId = null, sharedFromProfileId = null)
+                    } else {
+                        updated
+                    }
+                }
+            }
+        }
+        if (finished) followerIndex = followerIndex - leaderId
+    }
+
+    /** Copies the state of [leader] (status, bytes, file) to its followers. Finished followers stay as they are. */
+    private fun syncFollowersTo(leader: DownloadItem) {
+        applyToFollowers(leader.id, persistChange = true) { follower ->
+            if (follower.status == DownloadStatus.Completed) {
+                follower
+            } else {
+                follower.copy(
+                    status = leader.status,
+                    downloadedBytes = leader.downloadedBytes,
+                    totalBytes = leader.totalBytes,
+                    localFileUri = leader.localFileUri,
+                    errorMessage = leader.errorMessage,
+                    updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                )
+            }
+        }
     }
 
     fun pauseDownload(downloadId: String) {
         ensureLoaded()
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
         if (item.status != DownloadStatus.Downloading) return
+        if (item.isFollower) {
+            pauseLeaderOf(item)
+            return
+        }
 
         activeHandles.remove(downloadId)?.cancel()
         mutateItem(downloadId) { current ->
@@ -635,7 +905,7 @@ object DownloadsRepository {
     fun pauseActiveDownloads() {
         ensureLoaded()
         val active = _uiState.value.items
-            .filter { it.status == DownloadStatus.Downloading && it.isP2p }
+            .filter { it.status == DownloadStatus.Downloading && it.isP2p && !it.isFollower }
             .map { it.id }
         pausedForBackground.addAll(active)
         active.forEach(::pauseDownload)
@@ -665,6 +935,10 @@ object DownloadsRepository {
         ensureLoaded()
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
         if (item.status != DownloadStatus.Paused && item.status != DownloadStatus.Failed) return
+        if (item.isFollower) {
+            takeOverFromLeader(item)
+            return
+        }
 
         val reset = item.copy(
             status = DownloadStatus.Downloading,
@@ -675,6 +949,8 @@ object DownloadsRepository {
 
         replaceItem(reset)
         persist()
+        // Whoever follows this download shows it as running again.
+        syncFollowersTo(reset)
         startDownload(reset)
     }
 
@@ -685,10 +961,13 @@ object DownloadsRepository {
     internal fun reattachBackgroundDownload(downloadId: String) {
         if (!hasLoaded) return
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
+        // A follower is driven by its leader, never restored on its own.
+        if (item.isFollower) return
         activeHandles.remove(downloadId)?.cancel()
         val restored = DownloadsPlatformDownloader.restoreItem(item)
         replaceItem(restored)
         persist()
+        syncFollowersTo(restored)
         if (restored.status == DownloadStatus.Downloading) startDownload(restored)
     }
 
@@ -697,10 +976,14 @@ object DownloadsRepository {
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
 
         activeHandles.remove(downloadId)?.cancel()
+        // A running download that other profiles follow is handed to the first of them, and the
+        // files stay as long as any record points to them.
+        val promotion = releaseFollowRelations(item)
         deleteFilesUnlessShared(item)
 
         publish(_uiState.value.items.filterNot { it.id == downloadId })
         persist()
+        promotion?.let { handOverToFollower(it) }
     }
 
     /**
@@ -784,6 +1067,7 @@ object DownloadsRepository {
             _offlineDownloadsHome.value = true
             _uiState.value = DownloadsUiState()
             notifyLiveStatusPlatform()
+            rebuildFollowerIndex()
             return
         }
         _selectedSubtitleLanguages.value = DownloadsCodec.decodeSelectedLanguages(payload)
@@ -791,14 +1075,25 @@ object DownloadsRepository {
         _offlineDownloadsHome.value = DownloadsCodec.decodeOfflineDownloadsHome(payload)
 
         var shouldPersistNormalized = false
+        val unattendedLeaders = mutableSetOf<DownloadRef>()
         val normalized = DownloadsCodec.decodeItems(payload)
             .map { item ->
-                // A download that is running right now (it kept going while another profile was
-                // active) is not restored: restoring would mark a running torrent download as paused.
-                val statusNormalized = if (item.id in activeHandles) {
-                    item
-                } else {
-                    DownloadsPlatformDownloader.restoreItem(item)
+                val statusNormalized = when {
+                    // A record that follows another profile's download is not restored on its own
+                    // (that would mark it paused or start a second transfer of the same file).
+                    item.isFollower -> {
+                        val (resolved, needsReattach) = resolveFollowerOnLoad(item)
+                        val leaderProfileId = resolved.sharedFromProfileId
+                        val leaderId = resolved.sharedFromDownloadId
+                        if (needsReattach && leaderProfileId != null && leaderId != null) {
+                            unattendedLeaders += DownloadRef(leaderProfileId, leaderId)
+                        }
+                        resolved
+                    }
+                    // A download that is running right now (it kept going while another profile was
+                    // active) is not restored: restoring would mark a running torrent download as paused.
+                    item.id in activeHandles -> item
+                    else -> DownloadsPlatformDownloader.restoreItem(item)
                 }
 
                 val localUriNormalized = normalizeCompletedLocalFileUri(statusNormalized)
@@ -813,15 +1108,69 @@ object DownloadsRepository {
         if (shouldPersistNormalized) {
             persist()
         }
-        normalized.filter { it.status == DownloadStatus.Downloading && it.id !in activeHandles }
-            .forEach(::startDownload)
+        rebuildFollowerIndex()
+        // A download that ended while the app was closed tells the records that follow it.
+        normalized
+            .filter { it.status != DownloadStatus.Downloading && followerIndex[it.id].orEmpty().isNotEmpty() }
+            .forEach { syncFollowersTo(it) }
+        normalized
+            .filter { it.status == DownloadStatus.Downloading && it.id !in activeHandles && !it.isFollower }
+            .forEach { startDownload(it) }
+        unattendedLeaders.forEach { reattachLeader(it.profileId, it.itemId) }
     }
 
-    private fun startDownload(item: DownloadItem) {
+    /**
+     * A record that followed another profile's download, as it is when this profile's list is
+     * loaded: finished if the file is complete by now, standing alone if its leader is gone,
+     * otherwise mirroring its leader. The flag says that the leader claims to be downloading while
+     * nothing drives it, so the app has to re-attach to the leader's transfer ([reattachLeader]).
+     */
+    private fun resolveFollowerOnLoad(item: DownloadItem): Pair<DownloadItem, Boolean> {
+        // The file only gets its final name once it is complete.
+        val finishedUri = DownloadsPlatformDownloader.resolveLocalFileUri(
+            localFileUri = null,
+            destinationFileName = item.fileName,
+        )
+        if (finishedUri != null) {
+            return item.copy(
+                status = DownloadStatus.Completed,
+                localFileUri = finishedUri,
+                downloadedBytes = item.totalBytes ?: item.downloadedBytes,
+                errorMessage = null,
+                sharedFromDownloadId = null,
+                sharedFromProfileId = null,
+            ) to false
+        }
+        val leaderId = item.sharedFromDownloadId ?: return item to false
+        val leader = item.sharedFromProfileId?.let { storedItem(it, leaderId) }
+        if (leader == null || leader.status == DownloadStatus.Completed) {
+            // Its leader is gone (or finished without a file): it stands alone and resumes from
+            // the partial file when asked.
+            return item.copy(
+                sharedFromDownloadId = null,
+                sharedFromProfileId = null,
+                status = if (item.status == DownloadStatus.Downloading) DownloadStatus.Paused else item.status,
+            ) to false
+        }
+        if (leaderId in activeHandles) return item to false
+        if (leaderNeedsReattach(leader.status, leaderHasLiveTransfer = false)) {
+            return item.copy(status = DownloadStatus.Downloading, errorMessage = null) to true
+        }
+        return item.copy(
+            status = leader.status,
+            errorMessage = leader.errorMessage,
+            downloadedBytes = leader.downloadedBytes,
+            totalBytes = leader.totalBytes,
+        ) to false
+    }
+
+    /** Starts the transfer of [item]; its progress and result are saved in [ownerProfileId]'s list. */
+    private fun startDownload(item: DownloadItem, ownerProfileId: Int = ProfileRepository.activeProfileId) {
         if (item.isP2p && !P2pDownloadPlatform.runsInPlatformDownloader) {
-            startP2pDownload(item)
+            startP2pDownload(item, ownerProfileId)
             return
         }
+        handleOwners[item.id] = ownerProfileId
         val request = DownloadPlatformRequest(item)
 
         val handle = DownloadsPlatformDownloader.start(
@@ -869,7 +1218,6 @@ object DownloadsRepository {
         )
 
         activeHandles[item.id] = handle
-        handleOwners[item.id] = ProfileRepository.activeProfileId
     }
 
     // ---- Torrent (P2P) downloads -------------------------------------------------------------
@@ -884,10 +1232,10 @@ object DownloadsRepository {
     // stops (finished, paused, failed or cancelled), so the file is not stored twice afterwards.
     // The .part file holds everything downloaded so far, so nothing is lost by reclaiming.
 
-    private fun startP2pDownload(item: DownloadItem) {
+    private fun startP2pDownload(item: DownloadItem, ownerProfileId: Int) {
         val handle = P2pDownloadHandle(item.id)
         activeHandles[item.id] = handle
-        handleOwners[item.id] = ProfileRepository.activeProfileId
+        handleOwners[item.id] = ownerProfileId
         handle.job = p2pScope.launch {
             try {
                 runP2pDownload(item, handle)
@@ -1069,14 +1417,32 @@ object DownloadsRepository {
         }
     }
 
+    /**
+     * Changes the record [downloadId] and the records that follow it. It is looked up in the list
+     * of [ownerProfileId], otherwise of the profile the running download belongs to (see
+     * [handleOwners]), otherwise of the active profile.
+     */
     private fun mutateItem(
+        downloadId: String,
+        persistChange: Boolean = true,
+        ownerProfileId: Int? = null,
+        transform: (DownloadItem) -> DownloadItem,
+    ) {
+        val owner = ownerProfileId ?: handleOwners[downloadId] ?: ProfileRepository.activeProfileId
+        mutateItemIn(owner, downloadId, persistChange, transform)
+        // The same change (progress, finish, failure, pause) reaches every follower.
+        applyToFollowers(downloadId, persistChange, transform)
+    }
+
+    /** Changes the record [downloadId] in the list of [profileId], without touching its followers. */
+    private fun mutateItemIn(
+        profileId: Int,
         downloadId: String,
         persistChange: Boolean = true,
         transform: (DownloadItem) -> DownloadItem,
     ) {
-        val owner = handleOwners[downloadId]
-        if (owner != null && owner != ProfileRepository.activeProfileId) {
-            mutateItemOfOtherProfile(owner, downloadId, persistChange, transform)
+        if (profileId != ProfileRepository.activeProfileId) {
+            mutateItemOfOtherProfile(profileId, downloadId, persistChange, transform)
             return
         }
         var changed = false
@@ -1146,7 +1512,8 @@ object DownloadsRepository {
 
     private fun notifyLiveStatusPlatform() {
         runCatching {
-            DownloadsLiveStatusPlatform.onItemsChanged(_uiState.value.items)
+            // A record that only follows another profile's download is not a transfer of its own.
+            DownloadsLiveStatusPlatform.onItemsChanged(_uiState.value.items.filterNot { it.isFollower })
         }
     }
 
