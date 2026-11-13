@@ -20,6 +20,13 @@ internal actual object DownloadsStorage {
     actual fun loadPayload(profileId: Int): String? =
         preferences?.getString(ProfileScopedKey.of(payloadKey, profileId), null)
 
+    actual fun savePayload(profileId: Int, payload: String) {
+        preferences
+            ?.edit()
+            ?.putString(ProfileScopedKey.of(payloadKey, profileId), payload)
+            ?.apply()
+    }
+
     actual fun savePayload(payload: String) {
         preferences
             ?.edit()

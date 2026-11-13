@@ -12,6 +12,10 @@ internal actual object DownloadsStorage {
     actual fun loadPayload(profileId: Int): String? =
         NSUserDefaults.standardUserDefaults.stringForKey(ProfileScopedKey.of(payloadKey, profileId))
 
+    actual fun savePayload(profileId: Int, payload: String) {
+        NSUserDefaults.standardUserDefaults.setObject(payload, forKey = ProfileScopedKey.of(payloadKey, profileId))
+    }
+
     actual fun savePayload(payload: String) {
         NSUserDefaults.standardUserDefaults.setObject(payload, forKey = ProfileScopedKey.of(payloadKey))
     }
