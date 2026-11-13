@@ -1734,6 +1734,12 @@
     <string name="season_download_summary">Season download: %1$d started, %2$d without a matching source, %3$d already downloaded</string>
     <string name="season_download_shared_one">1 episode was already downloaded in another profile and shared</string>
     <string name="season_download_shared_many">%1$d episodes were already downloaded in another profile and shared</string>
+    <string name="download_shared_title">Already downloaded by another profile</string>
+    <string name="download_shared_message">Another profile already downloaded this with a different source. Use the same file to save space?</string>
+    <string name="download_shared_existing">Already downloaded</string>
+    <string name="download_shared_selected">Your selection</string>
+    <string name="download_shared_use_existing">Use existing file</string>
+    <string name="download_shared_download_anyway">Download this source anyway</string>
     <string name="download_options_title">Download options</string>
     <string name="download_options_subtitles">Subtitles</string>
     <string name="download_options_subtitles_hint">Choose which languages to download with the video</string>

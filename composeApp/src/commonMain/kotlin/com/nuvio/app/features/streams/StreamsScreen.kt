@@ -72,6 +72,7 @@ import com.nuvio.app.core.ui.dismissNuvioBottomSheet
 import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.core.ui.rememberArtworkBackdrop
 import com.nuvio.app.features.downloads.DownloadEnqueueResult
+import com.nuvio.app.features.downloads.DownloadSharingMode
 import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.downloads.SeasonDownloadBatch
 import com.nuvio.app.features.downloads.SeasonDownloadCoordinator
@@ -174,6 +175,7 @@ fun StreamsScreen(
     val downloadScope = rememberCoroutineScope()
 
     var optionsPrompt by remember { mutableStateOf<DownloadOptionsPrompt?>(null) }
+    var sharedDownloadPrompt by remember { mutableStateOf<SharedDownloadPrompt?>(null) }
 
     // Starts the download of [stream]: resolves debrid links, asks which extras to download with
     // the video, then queues it. Returns true if the download was started. The screen's scope is
@@ -196,30 +198,67 @@ fun StreamsScreen(
             stream
         }
 
-        // Nothing to ask when there are no subtitles to offer.
-        val available = DownloadsRepository.previewSubtitleLanguages(type, videoId, target)
-        val chosenSubtitles: List<String> = if (available.isEmpty()) {
-            emptyList()
-        } else {
-            val prompt = DownloadOptionsPrompt(
-                subtitleLanguageCodes = available,
-                initiallySelected = DownloadsRepository.initialSubtitleSelection(available),
-            )
-            optionsPrompt = prompt
-            val answer = try {
-                prompt.answer.await()
-            } finally {
-                optionsPrompt = null
+        // Another profile may already have this video: share its file instead of downloading it
+        // again. The same source is shared silently; a different one is asked about first.
+        var sharing = DownloadSharingMode.IfSameSource
+        var shareExisting = false
+        val otherProfileDownload = DownloadsRepository.findOtherProfileDownload(
+            parentMetaId = parentMetaId,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            stream = target,
+        )
+        if (otherProfileDownload != null) {
+            if (otherProfileDownload.isSameSource) {
+                shareExisting = true
+            } else {
+                val prompt = SharedDownloadPrompt(
+                    existingStream = otherProfileDownload.item.toExistingStreamItem(),
+                    selectedStream = target,
+                )
+                sharedDownloadPrompt = prompt
+                val choice = try {
+                    prompt.answer.await()
+                } finally {
+                    sharedDownloadPrompt = null
+                }
+                when (choice) {
+                    // Dismissing the question cancels the download.
+                    null -> return@async false
+                    SharedDownloadChoice.UseExisting -> shareExisting = true
+                    SharedDownloadChoice.DownloadAnyway -> sharing = DownloadSharingMode.Never
+                }
             }
-            // Dismissing the question cancels the download.
-            answer ?: return@async false
         }
-        if (available.isNotEmpty()) {
-            DownloadsRepository.rememberSubtitleSelection(offered = available, ticked = chosenSubtitles)
+        if (shareExisting) sharing = DownloadSharingMode.Always
+
+        // Nothing to ask when there are no subtitles to offer, or when the file is shared (it keeps
+        // the subtitles the first download saved).
+        var available: List<String> = emptyList()
+        var chosenSubtitles: List<String> = emptyList()
+        if (!shareExisting) {
+            available = DownloadsRepository.previewSubtitleLanguages(type, videoId, target)
+            if (available.isNotEmpty()) {
+                val prompt = DownloadOptionsPrompt(
+                    subtitleLanguageCodes = available,
+                    initiallySelected = DownloadsRepository.initialSubtitleSelection(available),
+                )
+                optionsPrompt = prompt
+                val answer = try {
+                    prompt.answer.await()
+                } finally {
+                    optionsPrompt = null
+                }
+                // Dismissing the question cancels the download.
+                chosenSubtitles = answer ?: return@async false
+            }
+            if (available.isNotEmpty()) {
+                DownloadsRepository.rememberSubtitleSelection(offered = available, ticked = chosenSubtitles)
+            }
         }
         // With nothing offered (e.g. the add-ons did not answer in time) there was no choice to
         // make: keep subtitles on, so whatever the add-ons return when the download starts is saved.
-        val downloadSubtitles = available.isEmpty() || chosenSubtitles.isNotEmpty()
+        val downloadSubtitles = shareExisting || available.isEmpty() || chosenSubtitles.isNotEmpty()
 
         val result = DownloadsRepository.enqueueFromStream(
             contentType = type,
@@ -238,6 +277,7 @@ fun StreamsScreen(
             downloadSubtitles = downloadSubtitles,
             // Empty means "every language": used when all of them were kept.
             subtitleLanguages = if (chosenSubtitles.size == available.size) emptyList() else chosenSubtitles,
+            sharing = sharing,
         )
         NuvioToastController.show(result.toastMessage())
         val started = result == DownloadEnqueueResult.Started ||
@@ -265,6 +305,7 @@ fun StreamsScreen(
     }
 
     optionsPrompt?.let { DownloadOptionsDialog(it) }
+    sharedDownloadPrompt?.let { SharedDownloadDialog(it) }
 
     var preferredFilterApplied by remember(videoId) { mutableStateOf(false) }
     val episodeProgress = watchProgressUiState.progressForVideo(
