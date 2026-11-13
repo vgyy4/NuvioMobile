@@ -19,7 +19,6 @@ import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -407,6 +406,23 @@ private fun LazyListScope.downloadsRootContent(
         }
     }
 
+    if (finished.isNotEmpty()) {
+        item(key = "downloads-finished-header") {
+            FinishedWatchingHeader(onDeleteAll = onDeleteAllFinished)
+        }
+        items(
+            items = finished,
+            key = { "finished-${it.id}" },
+        ) { item ->
+            FinishedDownloadRow(
+                item = item,
+                onOpen = { onOpenDownload(item) },
+                onLongPress = { onFinishedLongPress(item) },
+                onTrash = { onFinishedTrash(item) },
+            )
+        }
+    }
+
     if (activeItems.isNotEmpty()) {
         item {
             SectionTitle(stringResource(Res.string.downloads_section_active))
@@ -422,23 +438,6 @@ private fun LazyListScope.downloadsRootContent(
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
                 onRetry = { DownloadsRepository.retryDownload(item.id) },
                 onDelete = { onDeleteDownload(item.id) },
-            )
-        }
-    }
-
-    if (finished.isNotEmpty()) {
-        item(key = "downloads-finished-header") {
-            FinishedWatchingHeader(onDeleteAll = onDeleteAllFinished)
-        }
-        items(
-            items = finished,
-            key = { "finished-${it.id}" },
-        ) { item ->
-            FinishedDownloadRow(
-                item = item,
-                onOpen = { onOpenDownload(item) },
-                onLongPress = { onFinishedLongPress(item) },
-                onTrash = { onFinishedTrash(item) },
             )
         }
     }
@@ -706,10 +705,7 @@ private fun FinishedWatchingHeader(onDeleteAll: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.SemiBold,
         )
-        TextButton(
-            onClick = onDeleteAll,
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
+        TextButton(onClick = onDeleteAll) {
             Text(text = stringResource(Res.string.downloads_delete_finished))
         }
     }
