@@ -941,9 +941,6 @@ private object DownloadsCodec {
             json.decodeFromString<StoredDownloadsPayload>(payload).subtitleLanguages?.toSet()
         }.getOrNull()
 
-        runCatching {
-        }.getOrDefault(true)
-
     fun encode(
         items: Collection<DownloadItem>,
         selectedSubtitleLanguages: Set<String>?,
