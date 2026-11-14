@@ -40,6 +40,9 @@ jobs:
       APP_REF: ${{ github.event.inputs.ref || 'cmp-rewrite' }}
       LABEL: ${{ github.event.inputs.label || 'before' }}
       DEVICE: ${{ github.event.inputs.device || 'iPad Air' }}
+      # Upstream does not build with the runner's Xcode (it uses iOS 27.1 APIs); this fork commit adds
+      # the NUVIO_NO_IOS27_SDK guards and applies cleanly to upstream. It is cherry-picked when missing.
+      COMPAT_COMMIT: 1921cf0b2fea243c349fa8557717b24cae557da2
       GRADLE_OPTS: -Dfile.encoding=UTF-8
       NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
       NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
@@ -147,6 +150,18 @@ jobs:
       - name: Prepare iOS dependencies
         working-directory: NuvioMobile
         run: ./scripts/prepare-ios-dependencies.sh
+
+      - name: Make the ref build with the runner's Xcode
+        working-directory: NuvioMobile
+        run: |
+          if ! grep -q NUVIO_NO_IOS27_SDK iosApp/iosApp/ContentView.swift; then
+            git config user.email ci@example.invalid
+            git config user.name ci
+            git fetch --depth=2 origin "${COMPAT_COMMIT}"
+            git cherry-pick -x "${COMPAT_COMMIT}"
+          else
+            echo "ref already has the NUVIO_NO_IOS27_SDK guards"
+          fi
 
       # Recording-only change, applied on top of whatever ref is built: when the environment
       # variable NUVIO_FORCE_COMPOSE_SHELL=1 is set, use the Compose shell (the one iOS 15 uses)
