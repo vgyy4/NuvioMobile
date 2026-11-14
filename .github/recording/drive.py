@@ -120,48 +120,60 @@ def on_main(its):
 
 profile_name = "Rec"
 typed_name = False
+create_taps = 0
 created = False
-for step in range(30):
+for step in range(40):
     items = look(f"02-gate-{step:02d}")
     if on_main(items):
         log("main screen reached")
         break
+    texts = " | ".join(i["text"] for i in items).lower()
+    on_form = "choose an avatar" in texts or "custom avatar url" in texts
     if find_text(items, r"^continue without account"):
         tap_item(find_text(items, r"^continue without account"))
         time.sleep(15)  # anonymous sign-in goes over the network and is slow on CI
         continue
-    if find_text(items, r"create profile|save profile") and find_text(items, r"profile name|name"):
-        # profile edit screen: name field, then create
-        field = find_text(items, r"profile name")
-        if field and not typed_name:
-            tap_item(field)
-            time.sleep(1)
+    if on_form:
+        if not typed_name:
+            field = find_text(items, r"^profile name$")
+            tap(*(center(field) if field else (width * 0.5, height * 0.236)))
+            time.sleep(2)
             type_text(profile_name)
             typed_name = True
-            time.sleep(1)
+            time.sleep(4)
             continue
-        tap_item(find_text(items, r"create profile|save profile"))
-        created = True
-        time.sleep(8)
+        button = find_text(items, r"^create profile$|^save profile$")
+        if button:
+            tap_item(button)
+            create_taps += 1
+            created = True
+            time.sleep(12)  # creating a profile goes over the network
+            continue
+        time.sleep(5)
         continue
-    if find_text(items, r"^add profile$|^new profile$|add profile"):
-        tap_item(find_text(items, r"add profile|new profile"))
+    if find_text(items, r"^done$"):
+        tap_item(find_text(items, r"^done$"))
         time.sleep(4)
         continue
-    if find_text(items, r"who.?s watching"):
+    if "who" in texts and "watching" in texts:
         card = find_text(items, rf"^{profile_name}$") if created else None
         if card:
             tap_item(card)
-            time.sleep(10)
+            time.sleep(12)
+            continue
+        add = find_text(items, r"^add profile$")
+        if add:
+            tap_item(add)
+            time.sleep(5)
             continue
         manage = find_text(items, r"manage profiles")
         if manage:
             tap_item(manage)
-            time.sleep(4)
+            time.sleep(5)
             continue
-    if find_text(items, r"^done$"):
-        tap_item(find_text(items, r"^done$"))
-        time.sleep(4)
+    if find_text(items, r"^add profile$"):
+        tap_item(find_text(items, r"^add profile$"))
+        time.sleep(5)
         continue
     time.sleep(8)
 
