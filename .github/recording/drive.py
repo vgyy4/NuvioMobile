@@ -3,8 +3,9 @@
 screenshots and a video of the navigation bar, scrolling and long-press scenes.
 
 Usage: drive.py <udid> <bundle id> <output dir>
-Everything it learns is written to the output dir (dumps of the accessibility tree and a log), so a
-failed run can still be diagnosed from the artifact.
+Buttons are found by reading the screenshots with Apple's text recognition (OCR_TOOL, built from
+ocr.swift) because the app's accessibility tree is often empty in the simulator. The accessibility
+tree is still dumped when it is available. Everything it learns is written to the output dir.
 """
 import json
 import os
@@ -14,6 +15,7 @@ import sys
 import time
 
 udid, bundle, out = sys.argv[1], sys.argv[2], sys.argv[3]
+OCR_TOOL = os.environ.get("OCR_TOOL", "")
 os.makedirs(out, exist_ok=True)
 LOG = open(os.path.join(out, "driver.log"), "a", buffering=1)
 
@@ -24,20 +26,15 @@ def log(*parts):
     LOG.write(line + "\n")
 
 
-def run(cmd, check=False, timeout=120, capture=True):
-    log("$", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
-    if proc.stdout and capture:
-        log(proc.stdout.strip()[:2000])
+def run(cmd, timeout=180):
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        log("exit", proc.returncode, (proc.stderr or "").strip()[:1000])
-        if check:
-            raise SystemExit(f"command failed: {cmd}")
+        log("exit", proc.returncode, " ".join(cmd)[:120], (proc.stderr or "").strip()[:300])
     return proc
 
 
-def idb(*args, **kw):
-    return run(["idb", *args, "--udid", udid], **kw)
+def idb(*args, timeout=180):
+    return run(["idb", *args, "--udid", udid], timeout=timeout)
 
 
 def shot(name):
@@ -46,134 +43,131 @@ def shot(name):
     return path
 
 
-def tree():
-    proc = subprocess.run(["idb", "ui", "describe-all", "--udid", udid, "--json"], capture_output=True, text=True)
-    try:
-        data = json.loads(proc.stdout)
-        return data if isinstance(data, list) else []
-    except Exception:
-        # Older idb prints one JSON object per line.
-        items = []
-        for line in proc.stdout.splitlines():
-            try:
-                items.append(json.loads(line))
-            except Exception:
-                pass
-        return items
-
-
-def dump(name):
-    items = tree()
-    with open(os.path.join(out, f"{name}.json"), "w") as handle:
-        json.dump(items, handle, indent=1)
-    log(f"tree {name}: {len(items)} elements; labels:", [i.get("AXLabel") for i in items if i.get("AXLabel")][:40])
-    return items
-
-
-def center(item):
-    frame = item.get("frame") or {}
-    return frame.get("x", 0) + frame.get("width", 0) / 2, frame.get("y", 0) + frame.get("height", 0) / 2
-
-
-def find(items, pattern):
-    rx = re.compile(pattern, re.I)
-    for item in items:
-        if rx.search(item.get("AXLabel") or "") or rx.search(item.get("AXValue") or ""):
-            return item
-    return None
-
-
-def tap(x, y):
-    idb("ui", "tap", str(int(x)), str(int(y)))
-
-
-def swipe(x1, y1, x2, y2, duration=0.4):
-    idb("ui", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), "--duration", str(duration))
-
-
-def wait_for(pattern, seconds, step=3):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        items = tree()
-        hit = find(items, pattern)
-        if hit:
-            return items, hit
-        time.sleep(step)
-    return tree(), None
-
-
 def png_size(path):
     with open(path, "rb") as handle:
         header = handle.read(24)
     return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
 
 
-def screen_size():
-    """Screen size in points, from a screenshot (pixels / 2 on iPad and most iPhone simulators)."""
-    path = shot("_size")
-    w, h = png_size(path)
-    os.remove(path)
-    return w / 2.0, h / 2.0
+def tap(x, y):
+    log(f"tap {int(x)},{int(y)}")
+    idb("ui", "tap", str(int(x)), str(int(y)))
 
 
-width, height = screen_size()
+def swipe(x1, y1, x2, y2, duration=0.4):
+    log(f"swipe {int(x1)},{int(y1)} -> {int(x2)},{int(y2)} in {duration}s")
+    idb("ui", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), "--duration", str(duration))
+
+
+def type_text(text):
+    log("type", text)
+    idb("ui", "text", text)
+
+
+# ---- reading the screen ----------------------------------------------------------------------
+def ocr(path):
+    if not OCR_TOOL:
+        return []
+    proc = subprocess.run([OCR_TOOL, path], capture_output=True, text=True)
+    try:
+        return json.loads(proc.stdout)
+    except Exception:
+        log("ocr failed", proc.stderr[:200])
+        return []
+
+
+def look(name):
+    """Screenshot + OCR; returns the list of text boxes (points)."""
+    path = shot(name)
+    items = ocr(path)
+    log(f"[{name}] text:", [i["text"] for i in items][:40])
+    return items
+
+
+def find_text(items, pattern, region=None):
+    rx = re.compile(pattern, re.I)
+    for item in items:
+        if rx.search(item["text"]):
+            if region and not region(item):
+                continue
+            return item
+    return None
+
+
+def center(item):
+    return item["x"] + item["w"] / 2, item["y"] + item["h"] / 2
+
+
+def tap_item(item):
+    tap(*center(item))
+
+
+size_path = shot("_size")
+width, height = [v / 2.0 for v in png_size(size_path)]
+os.remove(size_path)
 log("screen", width, height)
 
-
-def wake_accessibility():
-    """The Compose accessibility tree is empty until something touches the screen: tap a blank corner."""
-    tap(width * 0.5, height - 24)
-    time.sleep(2)
-
-
-# ---- get past the sign-in gate ---------------------------------------------------------------
+# ---- get to the main screen: sign-in -> profile -> home -------------------------------------
 time.sleep(10)
-shot("00-launch")
-wake_accessibility()
-items = dump("00-launch-after-wake")
-if not items:
-    wake_accessibility()
-    items = dump("00-launch-after-wake2")
-hit = find(items, r"continue without")
-if not hit:
-    items, hit = wait_for(r"continue without", 30)
-if hit:
-    log("tapping 'Continue without account' by label", center(hit))
-    tap(*center(hit))
-else:
-    # Position measured on the iPad simulator: ~62% of the screen height, centred.
-    log("label not found; tapping the measured position")
-    tap(width * 0.5, height * 0.617)
-time.sleep(8)
-shot("01-after-auth")
-items = dump("01-after-auth")
-
-# profile selection or onboarding: look at what is on screen and tap a sensible element
-def has_tabs(its):
-    return bool(find(its, r"^home$") and find(its, r"^search$"))
+items = look("00-launch")
 
 
-for attempt in range(8):
-    items = tree()
-    if has_tabs(items):
+def on_main(its):
+    """The tab bar words are on screen (bottom bar or top bar)."""
+    words = {i["text"].strip().lower() for i in its}
+    return {"home", "search", "library"} <= words
+
+
+profile_name = "Rec"
+typed_name = False
+created = False
+for step in range(30):
+    items = look(f"02-gate-{step:02d}")
+    if on_main(items):
+        log("main screen reached")
         break
-    shot(f"02-gate-{attempt}")
-    dump(f"02-gate-{attempt}")
-    labels = [i.get("AXLabel") or "" for i in items]
-    log("gate labels", labels[:30])
-    prof = find(items, r"^(continue|start|get started|next|skip|done|ok|got it|not now|later)$") \
-        or find(items, r"(add profile|profile|who.?s watching)") 
-    if prof:
-        log("gate: tapping", prof.get("AXLabel"))
-        tap(*center(prof))
-    else:
-        tap(width / 2, height * 0.5)
-    time.sleep(6)
+    if find_text(items, r"^continue without account"):
+        tap_item(find_text(items, r"^continue without account"))
+        time.sleep(15)  # anonymous sign-in goes over the network and is slow on CI
+        continue
+    if find_text(items, r"create profile|save profile") and find_text(items, r"profile name|name"):
+        # profile edit screen: name field, then create
+        field = find_text(items, r"profile name")
+        if field and not typed_name:
+            tap_item(field)
+            time.sleep(1)
+            type_text(profile_name)
+            typed_name = True
+            time.sleep(1)
+            continue
+        tap_item(find_text(items, r"create profile|save profile"))
+        created = True
+        time.sleep(8)
+        continue
+    if find_text(items, r"^add profile$|^new profile$|add profile"):
+        tap_item(find_text(items, r"add profile|new profile"))
+        time.sleep(4)
+        continue
+    if find_text(items, r"who.?s watching"):
+        card = find_text(items, rf"^{profile_name}$") if created else None
+        if card:
+            tap_item(card)
+            time.sleep(10)
+            continue
+        manage = find_text(items, r"manage profiles")
+        if manage:
+            tap_item(manage)
+            time.sleep(4)
+            continue
+    if find_text(items, r"^done$"):
+        tap_item(find_text(items, r"^done$"))
+        time.sleep(4)
+        continue
+    time.sleep(8)
 
-log("waiting for the home screen to settle")
-time.sleep(25)  # catalogs load; the bar warm-up and the tab pre-compose run a few seconds after launch
-items = dump("03-home")
-shot("03-home")
+log("letting the home screen settle (catalogs load, the bar warm-up and tab pre-compose run)")
+time.sleep(30)
+items = look("03-home")
 
 # ---- record the scenes -----------------------------------------------------------------------
 video_path = os.path.join(out, "scenes.mp4")
@@ -185,12 +179,12 @@ time.sleep(3)
 
 tabs = {}
 for name in ("Home", "Search", "Library"):
-    item = find(items, rf"^{name}$")
+    item = find_text(items, rf"^{name}$")
     if item:
         tabs[name] = center(item)
-profile_tab = find(items, r"profile|settings")
-if profile_tab:
-    tabs["Profile"] = center(profile_tab)
+prof = find_text(items, r"^(profile|settings|{})$".format(profile_name))
+if prof:
+    tabs["Profile"] = center(prof)
 log("tabs", tabs)
 
 mid_x, mid_y = width / 2, height * 0.55
@@ -200,47 +194,39 @@ for _ in range(3):
     swipe(mid_x, mid_y + 200, mid_x, mid_y - 250, 0.35)
     time.sleep(0.4)
 time.sleep(1.5)
-shot("10-compact")
+look("10-compact")
 for _ in range(3):
     swipe(mid_x, mid_y - 250, mid_x, mid_y + 250, 0.35)
     time.sleep(0.4)
 time.sleep(1.5)
-shot("11-expanded")
+look("11-expanded")
 
 # Scene 2: tap through the tabs
 for name in ("Search", "Library", "Home"):
     if name in tabs:
         tap(*tabs[name])
-        time.sleep(1.6)
-        shot(f"20-tab-{name.lower()}")
+        time.sleep(2.5)
+        look(f"20-tab-{name.lower()}")
 
 # Scene 3: hold and drag the selection from the first to the last tab and back
 if "Home" in tabs and "Library" in tabs:
     x1, y1 = tabs["Home"]
     x2, y2 = tabs["Library"]
     swipe(x1, y1, x2, y2, 1.6)
-    time.sleep(1.2)
+    time.sleep(1.5)
     shot("30-after-drag")
     swipe(x2, y2, x1, y1, 1.6)
-    time.sleep(1.2)
+    time.sleep(1.5)
 
-# Scene 4: long-press a poster (a stationary swipe holds the finger down). Poster cards are the
-# portrait-shaped buttons/images in the upper half of the screen.
-poster = None
-for item in tree():
-    fr = item.get("frame") or {}
-    w, h, x, y = fr.get("width", 0), fr.get("height", 0), fr.get("x", 0), fr.get("y", 0)
-    if 80 <= w <= 260 and h >= w * 1.25 and 150 <= y <= height * 0.7 and x >= 0 and x + w <= width:
-        poster = (x + w / 2, y + h / 2)
-        log("poster candidate", item.get("AXLabel"), fr)
-        break
-px, py = poster if poster else (width * 0.2, height * 0.42)
+# Scene 4: long-press a poster (a stationary swipe holds the finger down). The position is a guess
+# (first poster row); it is corrected from the screenshots between runs.
+px, py = width * float(os.environ.get("POSTER_X", "0.2")), height * float(os.environ.get("POSTER_Y", "0.42"))
 swipe(px, py, px, py, 1.4)
 time.sleep(0.3)
 shot("40-long-press")
 time.sleep(1.2)
 shot("41-long-press-menu")
-tap(width * 0.5, height * 0.08)
+tap(width * 0.5, height * 0.06)
 time.sleep(1.0)
 
 time.sleep(2)

@@ -285,9 +285,17 @@ jobs:
           bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP_PATH}/Info.plist")"
           echo "BUNDLE_ID=${bundle}" >> "${GITHUB_ENV}"
 
+      - name: Build the screenshot text reader
+        run: swiftc -O recorder/.github/recording/ocr.swift -o "${RUNNER_TEMP}/ocr_tool"
+
       - name: Launch and record
+        env:
+          OCR_TOOL: ${{ runner.temp }}/ocr_tool
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/out/${LABEL}"
+          # Ask the simulator to expose accessibility (harmless when it has no effect).
+          xcrun simctl spawn "${SIM_UDID}" defaults write com.apple.Accessibility ApplicationAccessibilityEnabled -bool true || true
+          xcrun simctl spawn "${SIM_UDID}" defaults write com.apple.Accessibility AccessibilityEnabled -bool true || true
           SIMCTL_CHILD_NUVIO_FORCE_COMPOSE_SHELL=1 xcrun simctl launch "${SIM_UDID}" "${BUNDLE_ID}"
           python3 recorder/.github/recording/drive.py "${SIM_UDID}" "${BUNDLE_ID}" "${GITHUB_WORKSPACE}/out/${LABEL}"
 
