@@ -296,8 +296,22 @@ jobs:
           # Ask the simulator to expose accessibility (harmless when it has no effect).
           xcrun simctl spawn "${SIM_UDID}" defaults write com.apple.Accessibility ApplicationAccessibilityEnabled -bool true || true
           xcrun simctl spawn "${SIM_UDID}" defaults write com.apple.Accessibility AccessibilityEnabled -bool true || true
+          # Keep the system log of the app for the whole run (crash reasons end up here).
+          mkdir -p "${GITHUB_WORKSPACE}/out/${LABEL}/crash"
+          xcrun simctl spawn "${SIM_UDID}" log stream --level debug --style compact \
+            --predicate 'process == "Nuvio" OR eventMessage CONTAINS "Nuvio"' \
+            > "${GITHUB_WORKSPACE}/out/${LABEL}/crash/app-log-stream.txt" 2>&1 &
           SIMCTL_CHILD_NUVIO_FORCE_COMPOSE_SHELL=1 xcrun simctl launch "${SIM_UDID}" "${BUNDLE_ID}"
           python3 recorder/.github/recording/drive.py "${SIM_UDID}" "${BUNDLE_ID}" "${GITHUB_WORKSPACE}/out/${LABEL}"
+
+      - name: Collect crash reports
+        if: always()
+        run: |
+          mkdir -p "out/${LABEL}/crash"
+          cp ~/Library/Logs/DiagnosticReports/*Nuvio* "out/${LABEL}/crash/" 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/Retired/*Nuvio* "out/${LABEL}/crash/" 2>/dev/null || true
+          find "${HOME}/Library/Developer/CoreSimulator/Devices/${SIM_UDID}" -path '*CrashReporter*' -name '*Nuvio*' -exec cp {} "out/${LABEL}/crash/" \; 2>/dev/null || true
+          ls -la "out/${LABEL}/crash/" || true
 
       - name: Upload recordings
         if: always()

@@ -112,6 +112,24 @@ time.sleep(10)
 items = look("00-launch")
 
 
+def on_springboard(its):
+    words = {i["text"].strip() for i in its}
+    return {"Contacts", "Shortcuts", "Health"} <= words
+
+
+relaunches = 0
+
+
+def relaunch():
+    """The app died (crash or kill): start it again; saved state (sign-in, profile) is kept."""
+    global relaunches
+    relaunches += 1
+    log(f"app is not on screen (crash?) - relaunch #{relaunches}")
+    env = dict(os.environ, SIMCTL_CHILD_NUVIO_FORCE_COMPOSE_SHELL="1")
+    subprocess.run(["xcrun", "simctl", "launch", udid, bundle], env=env, capture_output=True, text=True)
+    time.sleep(25)
+
+
 def on_main(its):
     """The tab bar words are on screen (bottom bar or top bar)."""
     words = {i["text"].strip().lower() for i in its}
@@ -127,6 +145,12 @@ for step in range(40):
     if on_main(items):
         log("main screen reached")
         break
+    if on_springboard(items):
+        if relaunches >= 4:
+            log("giving up: the app keeps disappearing")
+            break
+        relaunch()
+        continue
     texts = " | ".join(i["text"] for i in items).lower()
     on_form = "choose an avatar" in texts or "custom avatar url" in texts
     if find_text(items, r"^continue without account"):
