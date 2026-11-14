@@ -6,6 +6,10 @@ on:
     branches:
       - ccr-9ba47f5b-ox81vl
       - ci-ios-build
+    # Pushes that only change the UI recording workflow/scripts need no Android build.
+    paths-ignore:
+      - .github/recording/**
+      - .github/workflows/ui-recordings.yml
 
 permissions:
   contents: read
