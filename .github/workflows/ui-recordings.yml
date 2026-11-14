@@ -18,6 +18,9 @@ on:
       device:
         description: Simulator device name contains (for example "iPad Air" or "iPhone 16")
         default: iPad Air
+      ios:
+        description: Simulator iOS major version (15 to 17; the baseline app needs 16.1 or newer)
+        default: '17'
   push:
     branches:
       - ccr-9ba47f5b-ox81vl
@@ -40,6 +43,7 @@ jobs:
       APP_REF: ${{ github.event.inputs.ref || 'cmp-rewrite' }}
       LABEL: ${{ github.event.inputs.label || 'before' }}
       DEVICE: ${{ github.event.inputs.device || 'iPad Air' }}
+      SIM_IOS_MAJOR: ${{ github.event.inputs.ios || '17' }}
       # Upstream does not build with the runner's Xcode (it uses iOS 27.1 APIs); this fork commit adds
       # the NUVIO_NO_IOS27_SDK guards and applies cleanly to upstream. It is cherry-picked when missing.
       COMPAT_COMMIT: 1921cf0b2fea243c349fa8557717b24cae557da2
@@ -234,17 +238,41 @@ jobs:
           python3 -m pip install --user --break-system-packages fb-idb || python3 -m pip install --user fb-idb
           echo "$(python3 -m site --user-base)/bin" >> "${GITHUB_PATH}"
 
+      # The Compose UI is drawn by the app itself, but the system chrome and the look of iOS 26 differ
+      # from iOS 15-17, so the recording must use an older runtime than the runner's default.
+      - name: Make sure an iOS ${{ env.SIM_IOS_MAJOR }} simulator runtime is installed
+        run: |
+          xcrun simctl list runtimes
+          have() {
+            xcrun simctl list runtimes -j | python3 -c '
+          import sys, json, os
+          major = os.environ["SIM_IOS_MAJOR"]
+          ok = [r for r in json.load(sys.stdin)["runtimes"]
+                if r.get("isAvailable") and "iOS" in r["identifier"].split(".")[-1] and r["version"].split(".")[0] == major]
+          sys.exit(0 if ok else 1)
+          '
+          }
+          if ! have; then
+            for v in "${SIM_IOS_MAJOR}.5" "${SIM_IOS_MAJOR}.4" "${SIM_IOS_MAJOR}.2" "${SIM_IOS_MAJOR}.0"; do
+              echo "Downloading the iOS ${v} simulator runtime"
+              if xcodebuild -downloadPlatform iOS -buildVersion "${v}" && have; then break; fi
+            done
+          fi
+          xcrun simctl list runtimes
+          have || { echo "No iOS ${SIM_IOS_MAJOR} simulator runtime available" >&2; exit 1; }
+
       - name: Create and boot the simulator
         run: |
           read -r runtime devtype < <(xcrun simctl list runtimes -j | python3 -c '
           import sys, json, os
           want = os.environ["DEVICE"].lower()
-          rts = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and "iOS" in r["identifier"].split(".")[-1]]
+          major = os.environ["SIM_IOS_MAJOR"]
+          rts = [r for r in json.load(sys.stdin)["runtimes"]
+                 if r.get("isAvailable") and "iOS" in r["identifier"].split(".")[-1] and r["version"].split(".")[0] == major]
           rts.sort(key=lambda r: [int(p) for p in r["version"].split(".")])
           rt = rts[-1]
           types = rt.get("supportedDeviceTypes", [])
           hit = [t for t in types if want in t["name"].lower()] or [t for t in types if "ipad" in t["name"].lower()]
-          # prefer the last (newest) matching device type that is not a mini
           hit = [t for t in hit if "mini" not in t["name"].lower()] or hit
           print(rt["identifier"], hit[-1]["identifier"])
           ')
