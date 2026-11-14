@@ -1,0 +1,236 @@
+name: UI recordings
+
+# Builds the app for an iOS simulator, forces the Compose shell (the one used on iOS 15) with an
+# environment variable, drives it with real taps/swipes (idb) and uploads screenshots and a video of
+# the navigation bar, scrolling and long-press scenes.
+# Run it twice: once with `ref` = the baseline (default: the fork's mirror of upstream, label "before")
+# and once with `ref` = the latest dev branch (label "after").
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref of the app to build (branch, tag or commit)
+        default: cmp-rewrite
+      label:
+        description: Name of the artifact (for example before or after)
+        default: before
+      device:
+        description: Simulator device name contains (for example "iPad Air" or "iPhone 16")
+        default: iPad Air
+  push:
+    branches:
+      - ccr-9ba47f5b-ox81vl
+    paths:
+      - .github/recording/request
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-recordings-${{ github.event.inputs.label || 'push' }}
+  cancel-in-progress: true
+
+jobs:
+  record:
+    name: Record ${{ github.event.inputs.label || 'push' }}
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      APP_REF: ${{ github.event.inputs.ref || 'cmp-rewrite' }}
+      LABEL: ${{ github.event.inputs.label || 'before' }}
+      DEVICE: ${{ github.event.inputs.device || 'iPad Air' }}
+      GRADLE_OPTS: -Dfile.encoding=UTF-8
+      NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
+      NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
+      NUVIO_ENGINE_ROOT: ${{ github.workspace }}/nuvio-engine
+      RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
+
+    steps:
+      - name: Check out the recorder scripts
+        uses: actions/checkout@v4
+        with:
+          path: recorder
+          sparse-checkout: .github/recording
+
+      - name: Check out the app (${{ env.APP_REF }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APP_REF }}
+          path: NuvioMobile
+
+      - name: Initialise MPVKit submodule
+        working-directory: NuvioMobile
+        run: git submodule update --init --recursive MPVKit
+
+      - name: Check out nuvio-engine
+        uses: actions/checkout@v4
+        with:
+          repository: vgyy4/nuvio-engine
+          ref: ccr-perf-9ba47f5b
+          path: nuvio-engine
+
+      - name: Select newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          sudo xcode-select -s "${newest}/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja ripgrep
+          perl -MText::Template -e 1 || sudo cpan -T Text::Template
+
+      - name: Resolve engine revision
+        id: engine-rev
+        run: echo "sha=$(git -C nuvio-engine rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache NuvioEngine.xcframework
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: nuvio-engine/platform/apple/NuvioEngine.xcframework
+          key: engine-xcframework-${{ runner.os }}-${{ runner.arch }}-${{ steps.engine-rev.outputs.sha }}
+
+      - name: Build NuvioEngine.xcframework
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        working-directory: nuvio-engine
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if NUVIO_BUILD_JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-apple-xcframework.sh; then
+              break
+            fi
+            [[ "${attempt}" == 8 ]] && exit 1
+            sleep $((attempt * 60))
+          done
+          ./scripts/verify-apple-xcframework.sh
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: NuvioMobile
+          cache-read-only: false
+
+      - name: Cache Kotlin Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/gradle/libs.versions.toml') }}
+          restore-keys: |
+            konan-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure runtime properties
+        working-directory: NuvioMobile
+        run: |
+          : > local.properties
+          if [[ -n "${RELEASE_PROPERTIES_BASE64}" ]]; then
+            printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
+            sed -i '' -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          fi
+          if ! grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties; then
+            curl -fsS --retry 3 https://api.nuvio.tv/.well-known/nuvio | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          print("NUVIO_SUPABASE_URL=" + d["backend_url"])
+          print("NUVIO_SUPABASE_ANON_KEY=" + d["publishable_key"])
+          print("NUVIO_SUPABASE_FALLBACK_URL=https://api-two.nuvioapp.space")
+          ' >> local.properties
+          fi
+
+      - name: Prepare iOS dependencies
+        working-directory: NuvioMobile
+        run: ./scripts/prepare-ios-dependencies.sh
+
+      # Recording-only change, applied on top of whatever ref is built: when the environment
+      # variable NUVIO_FORCE_COMPOSE_SHELL=1 is set, use the Compose shell (the one iOS 15 uses)
+      # even on a newer simulator. Nothing changes when it is not set.
+      - name: Force the Compose shell on newer iOS (recording only)
+        working-directory: NuvioMobile
+        run: |
+          perl -0pi -e 's/if #available\(iOS 16\.0, \*\) \{\n(\s*)NativeNavContentView\(\)/if #available(iOS 16.0, *), ProcessInfo.processInfo.environment["NUVIO_FORCE_COMPOSE_SHELL"] != "1" {\n$1NativeNavContentView()/' iosApp/iosApp/ContentView.swift
+          grep -n NUVIO_FORCE_COMPOSE_SHELL iosApp/iosApp/ContentView.swift
+
+      - name: Build the app for the simulator
+        working-directory: NuvioMobile
+        run: |
+          set -o pipefail
+          echo 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) NUVIO_NO_IOS27_SDK' > "${RUNNER_TEMP}/ci.xcconfig"
+          export XCODE_XCCONFIG_FILE="${RUNNER_TEMP}/ci.xcconfig"
+          mkdir -p "${GITHUB_WORKSPACE}/logs"
+          env NUVIO_IOS_DISTRIBUTION=full \
+            ORG_GRADLE_PROJECT_org.gradle.jvmargs="${NUVIO_GRADLE_JVMARGS}" \
+            ORG_GRADLE_PROJECT_kotlin.native.jvmArgs="${NUVIO_KOTLIN_NATIVE_JVMARGS}" \
+            xcodebuild \
+              -project iosApp/iosApp.xcodeproj \
+              -scheme iosApp \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath "${RUNNER_TEMP}/derived" \
+              ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+              build 2>&1 | tee "${GITHUB_WORKSPACE}/logs/xcodebuild.log"
+          app="$(find "${RUNNER_TEMP}/derived/Build/Products" -type d -name Nuvio.app -path '*-iphonesimulator/*' -print -quit)"
+          test -n "${app}"
+          echo "APP_PATH=${app}" >> "${GITHUB_ENV}"
+
+      - name: Install idb
+        run: |
+          brew tap facebook/fb
+          brew install idb-companion
+          python3 -m pip install --user --break-system-packages fb-idb || python3 -m pip install --user fb-idb
+          echo "$(python3 -m site --user-base)/bin" >> "${GITHUB_PATH}"
+
+      - name: Create and boot the simulator
+        run: |
+          runtime="$(xcrun simctl list runtimes -j | python3 -c '
+          import sys, json
+          rt = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and r["identifier"].split(".")[-1].startswith("iOS")]
+          rt.sort(key=lambda r: [int(p) for p in r["version"].split(".")])
+          print(rt[-1]["identifier"])
+          ')"
+          devtype="$(xcrun simctl list devicetypes -j | python3 -c '
+          import sys, json, os
+          want = os.environ["DEVICE"].lower()
+          types = json.load(sys.stdin)["devicetypes"]
+          hit = [t for t in types if want in t["name"].lower()] or [t for t in types if "ipad" in t["name"].lower()]
+          print(hit[-1]["identifier"])
+          ')"
+          echo "runtime=${runtime} devtype=${devtype}"
+          udid="$(xcrun simctl create nuvio-recorder "${devtype}" "${runtime}")"
+          echo "SIM_UDID=${udid}" >> "${GITHUB_ENV}"
+          xcrun simctl boot "${udid}"
+          xcrun simctl bootstatus "${udid}" -b
+          xcrun simctl install "${udid}" "${APP_PATH}"
+          bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP_PATH}/Info.plist")"
+          echo "BUNDLE_ID=${bundle}" >> "${GITHUB_ENV}"
+
+      - name: Launch and record
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/out/${LABEL}"
+          SIMCTL_CHILD_NUVIO_FORCE_COMPOSE_SHELL=1 xcrun simctl launch "${SIM_UDID}" "${BUNDLE_ID}"
+          python3 recorder/.github/recording/drive.py "${SIM_UDID}" "${BUNDLE_ID}" "${GITHUB_WORKSPACE}/out/${LABEL}"
+
+      - name: Upload recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recordings-${{ env.LABEL }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recording-logs-${{ env.LABEL }}
+          path: logs/
+          if-no-files-found: warn
