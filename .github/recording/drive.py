@@ -102,46 +102,73 @@ def wait_for(pattern, seconds, step=3):
     return tree(), None
 
 
-# Screen size in points: use the screenshot size of the simulator via the tree root, falling back to simctl.
+def png_size(path):
+    with open(path, "rb") as handle:
+        header = handle.read(24)
+    return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+
+
 def screen_size():
-    items = tree()
-    for item in items:
-        frame = item.get("frame") or {}
-        if item.get("type") == "Application" and frame.get("width"):
-            return frame["width"], frame["height"]
-    proc = subprocess.run(["xcrun", "simctl", "list", "devices", "-j"], capture_output=True, text=True)
-    return 820.0, 1180.0
+    """Screen size in points, from a screenshot (pixels / 2 on iPad and most iPhone simulators)."""
+    path = shot("_size")
+    w, h = png_size(path)
+    os.remove(path)
+    return w / 2.0, h / 2.0
 
 
 width, height = screen_size()
 log("screen", width, height)
 
+
+def wake_accessibility():
+    """The Compose accessibility tree is empty until something touches the screen: tap a blank corner."""
+    tap(width * 0.5, height - 24)
+    time.sleep(2)
+
+
 # ---- get past the sign-in gate ---------------------------------------------------------------
-time.sleep(8)
+time.sleep(10)
 shot("00-launch")
-dump("00-launch")
-items, hit = wait_for(r"continue without", 90)
+wake_accessibility()
+items = dump("00-launch-after-wake")
+if not items:
+    wake_accessibility()
+    items = dump("00-launch-after-wake2")
+hit = find(items, r"continue without")
+if not hit:
+    items, hit = wait_for(r"continue without", 30)
 if hit:
-    log("tapping 'Continue without account'")
+    log("tapping 'Continue without account' by label", center(hit))
     tap(*center(hit))
-    time.sleep(6)
 else:
-    log("no sign-in button found; continuing")
+    # Position measured on the iPad simulator: ~62% of the screen height, centred.
+    log("label not found; tapping the measured position")
+    tap(width * 0.5, height * 0.617)
+time.sleep(8)
 shot("01-after-auth")
 items = dump("01-after-auth")
 
-# profile selection or onboarding: tap the first profile-like element when there is no tab bar yet
-for attempt in range(6):
+# profile selection or onboarding: look at what is on screen and tap a sensible element
+def has_tabs(its):
+    return bool(find(its, r"^home$") and find(its, r"^search$"))
+
+
+for attempt in range(8):
     items = tree()
-    if find(items, r"^(home|search|library)$"):
+    if has_tabs(items):
         break
     shot(f"02-gate-{attempt}")
-    prof = find(items, r"(profile|continue|start|get started|next|skip)")
+    dump(f"02-gate-{attempt}")
+    labels = [i.get("AXLabel") or "" for i in items]
+    log("gate labels", labels[:30])
+    prof = find(items, r"^(continue|start|get started|next|skip|done|ok|got it|not now|later)$") \
+        or find(items, r"(add profile|profile|who.?s watching)") 
     if prof:
+        log("gate: tapping", prof.get("AXLabel"))
         tap(*center(prof))
     else:
-        tap(width / 2, height / 2)
-    time.sleep(5)
+        tap(width / 2, height * 0.5)
+    time.sleep(6)
 
 log("waiting for the home screen to settle")
 time.sleep(25)  # catalogs load; the bar warm-up and the tab pre-compose run a few seconds after launch
@@ -197,8 +224,18 @@ if "Home" in tabs and "Library" in tabs:
     swipe(x2, y2, x1, y1, 1.6)
     time.sleep(1.2)
 
-# Scene 4: long-press a poster (a stationary swipe holds the finger down)
-swipe(width * 0.22, height * 0.42, width * 0.22, height * 0.42, 1.4)
+# Scene 4: long-press a poster (a stationary swipe holds the finger down). Poster cards are the
+# portrait-shaped buttons/images in the upper half of the screen.
+poster = None
+for item in tree():
+    fr = item.get("frame") or {}
+    w, h, x, y = fr.get("width", 0), fr.get("height", 0), fr.get("x", 0), fr.get("y", 0)
+    if 80 <= w <= 260 and h >= w * 1.25 and 150 <= y <= height * 0.7 and x >= 0 and x + w <= width:
+        poster = (x + w / 2, y + h / 2)
+        log("poster candidate", item.get("AXLabel"), fr)
+        break
+px, py = poster if poster else (width * 0.2, height * 0.42)
+swipe(px, py, px, py, 1.4)
 time.sleep(0.3)
 shot("40-long-press")
 time.sleep(1.2)
