@@ -62,6 +62,18 @@ jobs:
           ref: ${{ env.APP_REF }}
           path: NuvioMobile
 
+      - name: Resolve the app revision
+        id: app-rev
+        working-directory: NuvioMobile
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore the built simulator app
+        id: app-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/simapp
+          key: simapp-v1-${{ steps.app-rev.outputs.sha }}-${{ env.COMPAT_COMMIT }}
+
       - name: Initialise MPVKit submodule
         working-directory: NuvioMobile
         run: git submodule update --init --recursive MPVKit
@@ -148,10 +160,12 @@ jobs:
           fi
 
       - name: Prepare iOS dependencies
+        if: steps.app-cache.outputs.cache-hit != 'true'
         working-directory: NuvioMobile
         run: ./scripts/prepare-ios-dependencies.sh
 
       - name: Make the ref build with the runner's Xcode
+        if: steps.app-cache.outputs.cache-hit != 'true'
         working-directory: NuvioMobile
         run: |
           if ! grep -q NUVIO_NO_IOS27_SDK iosApp/iosApp/ContentView.swift; then
@@ -167,12 +181,14 @@ jobs:
       # variable NUVIO_FORCE_COMPOSE_SHELL=1 is set, use the Compose shell (the one iOS 15 uses)
       # even on a newer simulator. Nothing changes when it is not set.
       - name: Force the Compose shell on newer iOS (recording only)
+        if: steps.app-cache.outputs.cache-hit != 'true'
         working-directory: NuvioMobile
         run: |
           perl -0pi -e 's/if #available\(iOS 16\.0, \*\) \{\n(\s*)NativeNavContentView\(\)/if #available(iOS 16.0, *), ProcessInfo.processInfo.environment["NUVIO_FORCE_COMPOSE_SHELL"] != "1" {\n$1NativeNavContentView()/' iosApp/iosApp/ContentView.swift
           grep -n NUVIO_FORCE_COMPOSE_SHELL iosApp/iosApp/ContentView.swift
 
       - name: Build the app for the simulator
+        if: steps.app-cache.outputs.cache-hit != 'true'
         working-directory: NuvioMobile
         run: |
           set -o pipefail
@@ -194,11 +210,26 @@ jobs:
               build 2>&1 | tee "${GITHUB_WORKSPACE}/logs/xcodebuild.log"
           app="$(find "${RUNNER_TEMP}/derived/Build/Products" -type d -name Nuvio.app -path '*-iphonesimulator/*' -print -quit)"
           test -n "${app}"
-          echo "APP_PATH=${app}" >> "${GITHUB_ENV}"
+          rm -rf "${HOME}/simapp" && mkdir -p "${HOME}/simapp"
+          cp -R "${app}" "${HOME}/simapp/Nuvio.app"
+
+      # Saved right after the build, so a failure in a later step does not throw the build away.
+      - name: Save the built simulator app
+        if: steps.app-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/simapp
+          key: simapp-v1-${{ steps.app-rev.outputs.sha }}-${{ env.COMPAT_COMMIT }}
+
+      - name: Locate the simulator app
+        run: |
+          test -d "${HOME}/simapp/Nuvio.app"
+          echo "APP_PATH=${HOME}/simapp/Nuvio.app" >> "${GITHUB_ENV}"
 
       - name: Install idb
         run: |
           brew tap facebook/fb
+          brew trust facebook/fb || true
           brew install idb-companion
           python3 -m pip install --user --break-system-packages fb-idb || python3 -m pip install --user fb-idb
           echo "$(python3 -m site --user-base)/bin" >> "${GITHUB_PATH}"
