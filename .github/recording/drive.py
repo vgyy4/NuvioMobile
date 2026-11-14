@@ -151,9 +151,14 @@ for step in range(40):
             continue
         time.sleep(5)
         continue
-    if find_text(items, r"^done$"):
+    # Manage mode ("Add Profile" tile + "Done"): add the profile first, press Done only afterwards.
+    if find_text(items, r"^add profile$") and not created:
+        tap_item(find_text(items, r"^add profile$"))
+        time.sleep(6)
+        continue
+    if find_text(items, r"^done$") and created:
         tap_item(find_text(items, r"^done$"))
-        time.sleep(4)
+        time.sleep(5)
         continue
     if "who" in texts and "watching" in texts:
         card = find_text(items, rf"^{profile_name}$") if created else None
