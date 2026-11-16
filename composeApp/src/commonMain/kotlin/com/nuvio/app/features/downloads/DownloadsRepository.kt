@@ -16,6 +16,8 @@ import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.player.computeVideoHash
 import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamSubtitle
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +38,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -71,14 +74,15 @@ object DownloadsRepository {
     // season downloads queue episodes from another thread.
     private val previewedSubtitles = MutableStateFlow<Map<String, PreviewedSubtitles>>(emptyMap())
 
-    private val activeHandles = mutableMapOf<String, DownloadsTaskHandle>()
+    // Read and changed from the UI thread, the platform's observers and the torrent coroutines at once.
+    private val activeHandles = ThreadSafeMap<String, DownloadsTaskHandle>()
 
     /**
      * The profile each running download belongs to. A download keeps running when another profile
      * is selected; its progress and result are then written to its own profile's list instead of
      * the active one.
      */
-    private val handleOwners = mutableMapOf<String, Int>()
+    private val handleOwners = ThreadSafeMap<String, Int>()
 
     /**
      * Records (in any profile) that follow a running download of another profile, by the id of the
@@ -90,7 +94,7 @@ object DownloadsRepository {
     // Limits how many torrents download at once; the rest wait their turn (first come, first served).
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
     private val p2pStartGate = Mutex()
-    private val pausedForBackground = mutableSetOf<String>()
+    private val pausedForBackground = MutableStateFlow<Set<String>>(emptySet())
     private var foregroundJob: Job? = null
     private var lastProgressPersistEpochMs = 0L
     private var hasLoaded = false
@@ -110,8 +114,7 @@ object DownloadsRepository {
     }
 
     fun clearLocalState() {
-        activeHandles.values.forEach(DownloadsTaskHandle::cancel)
-        activeHandles.clear()
+        activeHandles.removeAll().forEach(DownloadsTaskHandle::cancel)
         followerIndex = emptyMap()
         hasLoaded = false
         _hasUnseenCompleted.value = false
@@ -466,8 +469,7 @@ object DownloadsRepository {
             updatedAtEpochMs = now,
         )
 
-        currentItems.add(0, item)
-        publish(currentItems)
+        insertItem(item, existing?.id)
         persist()
         promotion?.let { handOverToFollower(it) }
         startDownload(item)
@@ -636,8 +638,7 @@ object DownloadsRepository {
             subtitleLanguages = _selectedSubtitleLanguages.value?.toList().orEmpty(),
             subtitleRequests = addonSubtitleRequests(type = contentType, videoId = videoId, extras = null),
         )
-        currentItems.add(0, linked)
-        publish(currentItems)
+        insertItem(linked, existing?.id)
         persist()
         if (candidate.isComplete) topUpSharedSubtitles(linked)
         promotion?.let { handOverToFollower(it) }
@@ -930,13 +931,12 @@ object DownloadsRepository {
         val active = _uiState.value.items
             .filter { it.status == DownloadStatus.Downloading && it.isP2p && !it.isFollower }
             .map { it.id }
-        pausedForBackground.addAll(active)
+        pausedForBackground.update { it + active }
         active.forEach(::pauseDownload)
     }
 
     private fun resumeDownloadsPausedForBackground() {
-        val ids = pausedForBackground.toList()
-        pausedForBackground.clear()
+        val ids = pausedForBackground.getAndUpdate { emptySet() }.toList()
         ids.forEach { id ->
             // Skip anything the user paused, cancelled or finished in the meantime.
             if (_uiState.value.items.firstOrNull { it.id == id }?.status == DownloadStatus.Paused) {
@@ -1004,7 +1004,7 @@ object DownloadsRepository {
         val promotion = releaseFollowRelations(item)
         deleteFilesUnlessShared(item)
 
-        publish(_uiState.value.items.filterNot { it.id == downloadId })
+        updateItems { latest -> latest.filterNot { it.id == downloadId } }
         persist()
         promotion?.let { handOverToFollower(it) }
     }
@@ -1499,20 +1499,19 @@ object DownloadsRepository {
             mutateItemOfOtherProfile(profileId, downloadId, persistChange, transform)
             return
         }
-        var changed = false
-        val updated = _uiState.value.items.map { item ->
-            if (item.id == downloadId) {
-                changed = true
-                transform(item)
-            } else {
-                item
+        val changed = updateItems { items ->
+            var hit = false
+            val updated = items.map { item ->
+                if (item.id == downloadId) {
+                    hit = true
+                    transform(item)
+                } else {
+                    item
+                }
             }
+            if (hit) updated else null
         }
-
-        if (changed) {
-            publish(updated)
-            if (persistChange) persist()
-        }
+        if (changed && persistChange) persist()
     }
 
     /** Updates a running download of a profile that is not the active one, in that profile's saved list. */
@@ -1547,13 +1546,40 @@ object DownloadsRepository {
     }
 
     private fun replaceItem(item: DownloadItem) {
-        val updated = _uiState.value.items.map { existing ->
-            if (existing.id == item.id) item else existing
+        updateItems { items -> items.map { existing -> if (existing.id == item.id) item else existing } }
+    }
+
+    /**
+     * The list of downloads is changed from several threads at once: progress and status updates of
+     * every running download (the platform's observers and the torrent coroutines) and the user's
+     * actions. Every change is therefore made against the LATEST list under one lock; reading the list,
+     * changing it and publishing it separately lets one update overwrite another, and a lost
+     * "completed" or "failed" update leaves a download stuck for good.
+     */
+    private val itemsLock = SynchronizedObject()
+
+    /** Replaces the list with [transform] applied to the latest one; null from [transform] means no change. */
+    private fun updateItems(transform: (List<DownloadItem>) -> List<DownloadItem>?): Boolean {
+        val changed = synchronized(itemsLock) {
+            val next = transform(_uiState.value.items) ?: return@synchronized false
+            setItems(next)
+            true
         }
-        publish(updated)
+        if (changed) notifyLiveStatusPlatform()
+        return changed
+    }
+
+    /** Puts [item] first, replacing the record with [replacedId] if there is one. */
+    private fun insertItem(item: DownloadItem, replacedId: String?) {
+        updateItems { latest -> listOf(item) + latest.filter { it.id != replacedId } }
     }
 
     private fun publish(items: List<DownloadItem>) {
+        synchronized(itemsLock) { setItems(items) }
+        notifyLiveStatusPlatform()
+    }
+
+    private fun setItems(items: List<DownloadItem>) {
         val previousStatuses = _uiState.value.items.associate { it.id to it.status }
         if (items.any { it.status == DownloadStatus.Completed && previousStatuses[it.id].let { status -> status != null && status != DownloadStatus.Completed } }) {
             _hasUnseenCompleted.value = true
@@ -1561,7 +1587,6 @@ object DownloadsRepository {
         _uiState.value = DownloadsUiState(
             items = items,
         )
-        notifyLiveStatusPlatform()
     }
 
     private fun notifyLiveStatusPlatform() {
@@ -1571,23 +1596,33 @@ object DownloadsRepository {
         }
     }
 
+    private val persistLock = SynchronizedObject()
+
     private fun persist() {
-        DownloadsStorage.savePayload(
-            DownloadsCodec.encode(
-                _uiState.value.items,
-                _selectedSubtitleLanguages.value,
-                legacyDeselectedSubtitleLanguages,
-                _offlineDownloadsHome.value,
-            ),
-        )
+        // Serialized, and the list is read inside the lock: with two threads persisting, the one that
+        // writes last must also have read last, or an older list could overwrite a newer one on disk.
+        synchronized(persistLock) {
+            DownloadsStorage.savePayload(
+                DownloadsCodec.encode(
+                    _uiState.value.items,
+                    _selectedSubtitleLanguages.value,
+                    legacyDeselectedSubtitleLanguages,
+                    _offlineDownloadsHome.value,
+                ),
+            )
+        }
     }
 
     private fun nextDownloadId(nowEpochMs: Long): String {
-        nextDownloadOrdinal += 1L
+        // Season downloads queue episodes from another thread: the counter must not be shared unguarded.
+        val ordinal = synchronized(itemsLock) {
+            nextDownloadOrdinal += 1L
+            nextDownloadOrdinal
+        }
         return buildString {
             append(nowEpochMs.toString(36))
             append('_')
-            append(nextDownloadOrdinal.toString(36))
+            append(ordinal.toString(36))
         }
     }
 
@@ -1622,6 +1657,26 @@ private const val P2P_RETRY_DELAY_MS = 10_000L
 // Computing the video hash reads a few blocks of the file; the subtitle lookup goes on without it.
 private const val SUBTITLE_HASH_TIMEOUT_MS = 3_000L
 private const val MAX_PREVIEWED_SUBTITLES = 8
+
+/** A small map that is safe to use from several threads: every operation holds one lock. */
+private class ThreadSafeMap<K, V> {
+    private val lock = SynchronizedObject()
+    private val map = mutableMapOf<K, V>()
+
+    operator fun get(key: K): V? = synchronized(lock) { map[key] }
+    operator fun set(key: K, value: V) {
+        synchronized(lock) { map[key] = value }
+    }
+    operator fun contains(key: K): Boolean = synchronized(lock) { map.containsKey(key) }
+    fun remove(key: K): V? = synchronized(lock) { map.remove(key) }
+
+    /** Empties the map and returns what it held. */
+    fun removeAll(): List<V> = synchronized(lock) {
+        val values = map.values.toList()
+        map.clear()
+        values
+    }
+}
 
 private class P2pDownloadHandle(val itemId: String) : DownloadsTaskHandle {
     var job: Job? = null
