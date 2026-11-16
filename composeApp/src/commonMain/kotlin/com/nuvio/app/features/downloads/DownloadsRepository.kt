@@ -95,9 +95,8 @@ object DownloadsRepository {
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
     private val p2pStartGate = Mutex()
 
-    // The engine serves one file per torrent at a time: opening a second file of the same torrent
-    // (two episodes of a season pack) stops the first one's stream. So downloads of one torrent
-    // take turns; other torrents still run in parallel.
+    // Downloads of one torrent take turns when the engine cannot serve several files of one
+    // torrent at once (see SAME_TORRENT_DOWNLOADS_IN_PARALLEL); other torrents always run in parallel.
     private val torrentLocks = ThreadSafeMap<String, Mutex>()
     private val torrentLocksGuard = Mutex()
     private suspend fun torrentLock(infoHash: String): Mutex = torrentLocksGuard.withLock {
@@ -1296,9 +1295,11 @@ object DownloadsRepository {
 
             // Wait for this torrent's turn first, then for a free slot, so a queued episode never
             // holds a slot another torrent could use. Only a few torrents run at once.
-            val lock = torrentLock(infoHash)
-            lock.lock()
-            heldTorrentLock = lock
+            if (!SAME_TORRENT_DOWNLOADS_IN_PARALLEL) {
+                val lock = torrentLock(infoHash)
+                lock.lock()
+                heldTorrentLock = lock
+            }
             torrentSlots.acquire()
             slotHeld = true
 
@@ -1675,6 +1676,13 @@ private const val SUBTITLE_HASH_TIMEOUT_MS = 3_000L
 private const val MAX_PREVIEWED_SUBTITLES = 8
 
 /** A small map that is safe to use from several threads: every operation holds one lock. */
+/**
+ * Two episodes of one season pack are one torrent. The engine now streams several files of a
+ * torrent side by side (a new stream no longer stops the others, a download keeps its own
+ * read-ahead window). Set to false to make such downloads take turns again.
+ */
+internal const val SAME_TORRENT_DOWNLOADS_IN_PARALLEL = true
+
 private class ThreadSafeMap<K, V> {
     private val lock = SynchronizedObject()
     private val map = mutableMapOf<K, V>()

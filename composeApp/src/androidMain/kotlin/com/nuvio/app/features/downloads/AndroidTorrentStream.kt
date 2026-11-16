@@ -42,7 +42,7 @@ private const val TORRENT_START_TIMEOUT_MS = 3L * 60L * 1_000L
  */
 internal class AndroidTorrentStream private constructor(
     private val downloadId: String,
-    private val infoHash: String,
+    private val heldLock: Mutex?,
     private val stream: P2pDownloadStream,
 ) {
     val localUrl: String get() = stream.localUrl
@@ -53,16 +53,15 @@ internal class AndroidTorrentStream private constructor(
         } finally {
             TorrentDiskBudget.release(downloadId)
             slots.release()
-            torrentLock(infoHash).unlock()
+            heldLock?.unlock()
         }
     }
 
     companion object {
         private val slots = Semaphore(maxConcurrentTorrentDownloads())
 
-        // The engine serves one file per torrent at a time: opening a second file of the same
-        // torrent (two episodes of a season pack) stops the first one's stream and drops its
-        // pieces. So downloads of one torrent take turns; other torrents still run in parallel.
+        // Only used while SAME_TORRENT_DOWNLOADS_IN_PARALLEL is off: then downloads of one torrent
+        // (two episodes of a season pack) take turns; other torrents always run in parallel.
         private val torrentLocks = ConcurrentHashMap<String, Mutex>()
         private fun torrentLock(infoHash: String): Mutex =
             torrentLocks.getOrPut(infoHash.lowercase()) { Mutex() }
@@ -77,8 +76,8 @@ internal class AndroidTorrentStream private constructor(
             }
             // Wait for the torrent first, then for a free slot, so a queued episode never holds a
             // slot that another torrent could be using.
-            val lock = torrentLock(infoHash)
-            lock.lock()
+            val lock = if (SAME_TORRENT_DOWNLOADS_IN_PARALLEL) null else torrentLock(infoHash)
+            lock?.lock()
             var slotTaken = false
             var opened = false
             try {
@@ -95,11 +94,11 @@ internal class AndroidTorrentStream private constructor(
                     )
                 } ?: throw TorrentNoPeersException(getString(Res.string.downloads_p2p_no_peers))
                 opened = true
-                return AndroidTorrentStream(item.id, infoHash, stream)
+                return AndroidTorrentStream(item.id, lock, stream)
             } finally {
                 if (!opened) {
                     if (slotTaken) slots.release()
-                    lock.unlock()
+                    lock?.unlock()
                 }
             }
         }
