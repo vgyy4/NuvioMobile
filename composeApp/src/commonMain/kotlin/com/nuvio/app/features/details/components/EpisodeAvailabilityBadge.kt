@@ -22,7 +22,7 @@ internal fun EpisodeAvailabilityBadge(
     video: MetaVideo,
     modifier: Modifier = Modifier,
 ) {
-    if (video.available && isEpisodeReleaseAired(video.released) != false) return
+    if (!video.showsAvailabilityBadge()) return
 
     Text(
         text = stringResource(Res.string.episodes_unavailable).uppercase(),
@@ -36,3 +36,7 @@ internal fun EpisodeAvailabilityBadge(
         overflow = TextOverflow.Ellipsis,
     )
 }
+
+/** True when the "unavailable" badge is drawn on this episode (not released yet / not available). */
+internal fun MetaVideo.showsAvailabilityBadge(): Boolean =
+    !(available && isEpisodeReleaseAired(released) != false)

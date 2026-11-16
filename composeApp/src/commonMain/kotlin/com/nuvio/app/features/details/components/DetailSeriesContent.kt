@@ -1276,23 +1276,17 @@ private fun EpisodeListCard(
                     )
                 }
 
-                Row(
+                EpisodeCodeBadge(
+                    text = video.episodeBadge(),
+                    textSize = sizing.badgeTextSize,
+                    radius = sizing.badgeRadius,
+                    horizontalPadding = sizing.badgeHorizontalPadding,
+                    verticalPadding = sizing.badgeVerticalPadding,
+                    backgroundAlpha = 0.85f,
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(start = 8.dp, top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    EpisodeCodeBadge(
-                        text = video.episodeBadge(),
-                        textSize = sizing.badgeTextSize,
-                        radius = sizing.badgeRadius,
-                        horizontalPadding = sizing.badgeHorizontalPadding,
-                        verticalPadding = sizing.badgeVerticalPadding,
-                        backgroundAlpha = 0.85f,
-                    )
-                    EpisodeDownloadBadge(downloadState)
-                }
+                )
 
                 NuvioAnimatedWatchedBadge(
                     isVisible = isWatched,
@@ -1315,6 +1309,25 @@ private fun EpisodeListCard(
                             },
                         ),
                 )
+
+                // Bottom right of the thumbnail: the top corners hold the episode number and the watched
+                // badge, the bottom left the "unavailable" label and the progress bar runs along the
+                // bottom edge, so this is lifted above it and left out when the label is shown.
+                if (!video.showsAvailabilityBadge()) {
+                    EpisodeDownloadBadge(
+                        state = downloadState,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(
+                                end = 8.dp,
+                                bottom = if (progressEntry != null && progressEntry.durationMs > 0L && !progressEntry.isCompleted) {
+                                    24.dp
+                                } else {
+                                    8.dp
+                                },
+                            ),
+                    )
+                }
             }
 
             Column(
