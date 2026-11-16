@@ -94,6 +94,16 @@ object DownloadsRepository {
     // Limits how many torrents download at once; the rest wait their turn (first come, first served).
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
     private val p2pStartGate = Mutex()
+
+    // The engine serves one file per torrent at a time: opening a second file of the same torrent
+    // (two episodes of a season pack) stops the first one's stream. So downloads of one torrent
+    // take turns; other torrents still run in parallel.
+    private val torrentLocks = ThreadSafeMap<String, Mutex>()
+    private val torrentLocksGuard = Mutex()
+    private suspend fun torrentLock(infoHash: String): Mutex = torrentLocksGuard.withLock {
+        val key = infoHash.lowercase()
+        torrentLocks[key] ?: Mutex().also { torrentLocks[key] = it }
+    }
     private val pausedForBackground = MutableStateFlow<Set<String>>(emptySet())
     private var foregroundJob: Job? = null
     private var lastProgressPersistEpochMs = 0L
@@ -1270,6 +1280,7 @@ object DownloadsRepository {
 
     private suspend fun runP2pDownload(item: DownloadItem, handle: P2pDownloadHandle) {
         var slotHeld = false
+        var heldTorrentLock: Mutex? = null
         var stream: P2pDownloadStream? = null
         try {
             val infoHash = item.p2pInfoHash
@@ -1283,7 +1294,11 @@ object DownloadsRepository {
                 return
             }
 
-            // Only a few torrents run at once; the rest wait here in the order they were started.
+            // Wait for this torrent's turn first, then for a free slot, so a queued episode never
+            // holds a slot another torrent could use. Only a few torrents run at once.
+            val lock = torrentLock(infoHash)
+            lock.lock()
+            heldTorrentLock = lock
             torrentSlots.acquire()
             slotHeld = true
 
@@ -1398,6 +1413,7 @@ object DownloadsRepository {
                 stream?.let { runCatching { P2pStreamingEngine.closeDownloadStream(it) } }
                 TorrentDiskBudget.release(item.id)
                 if (slotHeld) torrentSlots.release()
+                heldTorrentLock?.unlock()
             }
         }
     }

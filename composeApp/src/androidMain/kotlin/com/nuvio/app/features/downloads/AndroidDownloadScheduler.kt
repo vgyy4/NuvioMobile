@@ -209,8 +209,9 @@ internal class AndroidDownloadScheduler(val context: Context) {
                             }
                             if (now - lastProgressAt >= 1_000L || bytes == total) {
                                 lastProgressAt = now
+                                // Moving data again means the earlier failures are behind us.
                                 updateActive(transfer) {
-                                    it.copy(item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
+                                    it.copy(retryCount = 0, item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
                                 }?.let(onProgress)
                             }
                         },
