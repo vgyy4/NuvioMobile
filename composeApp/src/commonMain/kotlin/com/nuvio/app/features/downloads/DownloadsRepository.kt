@@ -1287,111 +1287,107 @@ object DownloadsRepository {
             torrentSlots.acquire()
             slotHeld = true
 
-            stream = try {
-                // The engine opens one torrent at a time. Waiting for another torrent's start must not
-                // eat into this one's time to connect, or two slow torrents would both time out.
-                p2pStartGate.withLock {
-                    withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
-                        P2pStreamingEngine.openDownloadStream(
-                            P2pStreamRequest(
-                                infoHash = infoHash,
-                                fileIdx = item.p2pFileIdx,
-                                filename = item.p2pFilename,
-                                trackers = item.p2pTrackers,
+            var attempt = 0
+            while (true) {
+                val opened = openP2pStreamOrFail(item) ?: return
+                stream = opened
+                currentCoroutineContext().ensureActive()
+
+                val outcome = CompletableDeferred<P2pDownloadOutcome>()
+                var spaceChecked = false
+                val transfer = DownloadsPlatformDownloader.start(
+                    request = DownloadPlatformRequest(
+                        item.copy(sourceUrl = opened.localUrl, sourceHeaders = emptyMap()),
+                    ),
+                    onProgress = { downloadedBytes, totalBytes ->
+                        if (totalBytes != null && totalBytes > 0L) {
+                            if (!spaceChecked) {
+                                spaceChecked = true
+                                val shortfall = TorrentDiskBudget.reserve(
+                                    downloadId = item.id,
+                                    totalBytes = totalBytes,
+                                    downloadedBytes = downloadedBytes,
+                                    freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
+                                )
+                                if (shortfall != null) {
+                                    handle.stopping = true
+                                    outcome.complete(
+                                        P2pDownloadOutcome.NotEnoughSpace(shortfall.neededBytes, shortfall.freeBytes),
+                                    )
+                                }
+                            } else {
+                                TorrentDiskBudget.update(item.id, totalBytes, downloadedBytes)
+                            }
+                        }
+                        if (!handle.stopping) applyProgress(item.id, downloadedBytes, totalBytes)
+                    },
+                    onSuccess = { localFileUri, totalBytes ->
+                        handle.stopping = true
+                        outcome.complete(P2pDownloadOutcome.Success(localFileUri, totalBytes))
+                    },
+                    onFailure = { message ->
+                        handle.stopping = true
+                        outcome.complete(P2pDownloadOutcome.Failure(message))
+                    },
+                    onPaused = {
+                        handle.stopping = true
+                        outcome.complete(P2pDownloadOutcome.Paused)
+                    },
+                )
+                handle.transfer = transfer
+                if (handle.stopping && !outcome.isCompleted) transfer.cancel()
+
+                val result = outcome.await()
+                if (result is P2pDownloadOutcome.Failure && attempt < P2P_TRANSFER_RETRIES) {
+                    // A stalled or dropped transfer (for example two torrents competing for the same few
+                    // peers) is tried again from the partial file instead of failing at once. A pause or
+                    // cancel never gets here: they end the coroutine or complete the outcome differently.
+                    attempt++
+                    withContext(NonCancellable) {
+                        transfer.cancel()
+                        runCatching { P2pStreamingEngine.closeDownloadStream(opened) }
+                    }
+                    stream = null
+                    delay(P2P_RETRY_DELAY_MS * attempt)
+                    val current = _uiState.value.items.firstOrNull { it.id == item.id }
+                    if (current == null || current.status != DownloadStatus.Downloading) return
+                    handle.stopping = false
+                    continue
+                }
+
+                when (result) {
+                    is P2pDownloadOutcome.Success -> mutateItem(item.id) { current ->
+                        if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                        current.copy(
+                            status = DownloadStatus.Completed,
+                            localFileUri = result.localFileUri,
+                            downloadedBytes = result.totalBytes?.takeIf { it > 0L } ?: current.downloadedBytes,
+                            totalBytes = result.totalBytes?.takeIf { it > 0L } ?: current.totalBytes,
+                            errorMessage = null,
+                            updatedAtEpochMs = DownloadsClock.nowEpochMs(),
+                        )
+                    }
+                    is P2pDownloadOutcome.Failure -> markFailed(
+                        item.id,
+                        result.message.ifBlank { getString(Res.string.download_failed) },
+                    )
+                    is P2pDownloadOutcome.NotEnoughSpace -> {
+                        transfer.cancel()
+                        markFailed(
+                            item.id,
+                            getString(
+                                Res.string.downloads_p2p_not_enough_space,
+                                formatP2pMegabytes(result.neededBytes),
+                                formatP2pMegabytes(result.freeBytes),
                             ),
                         )
                     }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                markFailed(
-                    item.id,
-                    error.message?.takeIf { it.isNotBlank() } ?: getString(Res.string.download_failed),
-                )
-                return
-            }
-            if (stream == null) {
-                markFailed(item.id, getString(Res.string.downloads_p2p_no_peers))
-                return
-            }
-            currentCoroutineContext().ensureActive()
-
-            val outcome = CompletableDeferred<P2pDownloadOutcome>()
-            var spaceChecked = false
-            val transfer = DownloadsPlatformDownloader.start(
-                request = DownloadPlatformRequest(
-                    item.copy(sourceUrl = stream.localUrl, sourceHeaders = emptyMap()),
-                ),
-                onProgress = { downloadedBytes, totalBytes ->
-                    if (totalBytes != null && totalBytes > 0L) {
-                        if (!spaceChecked) {
-                            spaceChecked = true
-                            val shortfall = TorrentDiskBudget.reserve(
-                                downloadId = item.id,
-                                totalBytes = totalBytes,
-                                downloadedBytes = downloadedBytes,
-                                freeBytes = P2pDownloadPlatform.freeDiskSpaceBytes(),
-                            )
-                            if (shortfall != null) {
-                                handle.stopping = true
-                                outcome.complete(
-                                    P2pDownloadOutcome.NotEnoughSpace(shortfall.neededBytes, shortfall.freeBytes),
-                                )
-                            }
-                        } else {
-                            TorrentDiskBudget.update(item.id, totalBytes, downloadedBytes)
-                        }
+                    P2pDownloadOutcome.Paused -> mutateItem(item.id) { current ->
+                        if (current.status != DownloadStatus.Downloading) return@mutateItem current
+                        current.copy(status = DownloadStatus.Paused, errorMessage = null)
                     }
-                    if (!handle.stopping) applyProgress(item.id, downloadedBytes, totalBytes)
-                },
-                onSuccess = { localFileUri, totalBytes ->
-                    handle.stopping = true
-                    outcome.complete(P2pDownloadOutcome.Success(localFileUri, totalBytes))
-                },
-                onFailure = { message ->
-                    handle.stopping = true
-                    outcome.complete(P2pDownloadOutcome.Failure(message))
-                },
-                onPaused = {
-                    handle.stopping = true
-                    outcome.complete(P2pDownloadOutcome.Paused)
-                },
-            )
-            handle.transfer = transfer
-            if (handle.stopping && !outcome.isCompleted) transfer.cancel()
-
-            when (val result = outcome.await()) {
-                is P2pDownloadOutcome.Success -> mutateItem(item.id) { current ->
-                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
-                    current.copy(
-                        status = DownloadStatus.Completed,
-                        localFileUri = result.localFileUri,
-                        downloadedBytes = result.totalBytes?.takeIf { it > 0L } ?: current.downloadedBytes,
-                        totalBytes = result.totalBytes?.takeIf { it > 0L } ?: current.totalBytes,
-                        errorMessage = null,
-                        updatedAtEpochMs = DownloadsClock.nowEpochMs(),
-                    )
                 }
-                is P2pDownloadOutcome.Failure -> markFailed(
-                    item.id,
-                    result.message.ifBlank { getString(Res.string.download_failed) },
-                )
-                is P2pDownloadOutcome.NotEnoughSpace -> {
-                    transfer.cancel()
-                    markFailed(
-                        item.id,
-                        getString(
-                            Res.string.downloads_p2p_not_enough_space,
-                            formatP2pMegabytes(result.neededBytes),
-                            formatP2pMegabytes(result.freeBytes),
-                        ),
-                    )
-                }
-                P2pDownloadOutcome.Paused -> mutateItem(item.id) { current ->
-                    if (current.status != DownloadStatus.Downloading) return@mutateItem current
-                    current.copy(status = DownloadStatus.Paused, errorMessage = null)
-                }
+                break
             }
         } finally {
             handle.stopping = true
@@ -1404,6 +1400,37 @@ object DownloadsRepository {
                 if (slotHeld) torrentSlots.release()
             }
         }
+    }
+
+    /** Opens the engine stream for [item]; marks the download failed and returns null if that is not possible. */
+    private suspend fun openP2pStreamOrFail(item: DownloadItem): P2pDownloadStream? {
+        val infoHash = item.p2pInfoHash ?: return null
+        val stream = try {
+            // The engine opens one torrent at a time. Waiting for another torrent's start must not
+            // eat into this one's time to connect, or two slow torrents would both time out.
+            p2pStartGate.withLock {
+                withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
+                    P2pStreamingEngine.openDownloadStream(
+                        P2pStreamRequest(
+                            infoHash = infoHash,
+                            fileIdx = item.p2pFileIdx,
+                            filename = item.p2pFilename,
+                            trackers = item.p2pTrackers,
+                        ),
+                    )
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            markFailed(
+                item.id,
+                error.message?.takeIf { it.isNotBlank() } ?: getString(Res.string.download_failed),
+            )
+            return null
+        }
+        if (stream == null) markFailed(item.id, getString(Res.string.downloads_p2p_no_peers))
+        return stream
     }
 
     private fun markFailed(downloadId: String, message: String) {
@@ -1588,6 +1615,10 @@ object DownloadsRepository {
 private const val PROGRESS_PERSIST_INTERVAL_MS = 2_000L
 private const val ORPHAN_SWEEP_DELAY_MS = 20_000L
 private const val P2P_START_TIMEOUT_MS = 3L * 60L * 1_000L
+// A torrent transfer that fails (stalled piece, dropped local connection) is retried this often,
+// each time after a longer pause, resuming from the partial file.
+private const val P2P_TRANSFER_RETRIES = 3
+private const val P2P_RETRY_DELAY_MS = 10_000L
 // Computing the video hash reads a few blocks of the file; the subtitle lookup goes on without it.
 private const val SUBTITLE_HASH_TIMEOUT_MS = 3_000L
 private const val MAX_PREVIEWED_SUBTITLES = 8
