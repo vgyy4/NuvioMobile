@@ -1,6 +1,13 @@
 package com.nuvio.app.features.streams
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -90,6 +97,38 @@ internal fun DownloadOptionsDialog(prompt: DownloadOptionsPrompt) {
                     prompt.answer.complete(prompt.subtitleLanguageCodes.filter { it in selected })
                 },
                 style = DialogButtonStyle.Primary,
+            )
+        }
+    }
+}
+
+/**
+ * Shown from the tap on Download until the options question (or the "download started" toast)
+ * appears, so a slow lookup (debrid link, subtitle add-ons, torrent connection) is visibly busy.
+ * Cancel (or dismissing it) stops the download from being queued.
+ */
+@Composable
+internal fun DownloadPreparingDialog(onDismiss: () -> Unit) {
+    DialogSurface(
+        onDismissRequest = onDismiss,
+        title = stringResource(Res.string.downloads_preparing),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+            Text(
+                text = stringResource(Res.string.downloads_preparing_hint),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        DialogButtons {
+            DialogButton(
+                text = stringResource(Res.string.action_cancel),
+                onClick = onDismiss,
             )
         }
     }

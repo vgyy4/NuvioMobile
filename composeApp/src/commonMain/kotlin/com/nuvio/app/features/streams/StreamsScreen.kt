@@ -175,11 +175,13 @@ fun StreamsScreen(
 
     var optionsPrompt by remember { mutableStateOf<DownloadOptionsPrompt?>(null) }
     var sharedDownloadPrompt by remember { mutableStateOf<SharedDownloadPrompt?>(null) }
+    var preparingDownload by remember { mutableStateOf(false) }
+    var preparingDownloadJob by remember { mutableStateOf<Deferred<Boolean>?>(null) }
 
     // Starts the download of [stream]: resolves debrid links, asks which extras to download with
     // the video, then queues it. Returns true if the download was started. The screen's scope is
     // cancelled when it goes away, so callers that leave wait for the result first.
-    fun startStreamDownload(stream: StreamItem): Deferred<Boolean> = downloadScope.async {
+    suspend fun prepareAndEnqueueDownload(stream: StreamItem): Boolean {
         val target: StreamItem = if (DirectDebridPlaybackResolver.shouldResolveToPlayableStream(stream)) {
             val resolved = DirectDebridPlaybackResolver.resolveToPlayableStream(
                 stream = stream,
@@ -190,7 +192,7 @@ fun StreamsScreen(
                 is DirectDebridPlayableResult.Success -> resolved.stream
                 else -> {
                     resolved.toastMessage()?.let { NuvioToastController.show(it) }
-                    return@async false
+                    return false
                 }
             }
         } else {
@@ -223,7 +225,7 @@ fun StreamsScreen(
                 }
                 when (choice) {
                     // Dismissing the question cancels the download.
-                    null -> return@async false
+                    null -> return false
                     SharedDownloadChoice.UseExisting -> shareExisting = true
                     SharedDownloadChoice.DownloadAnyway -> sharing = DownloadSharingMode.Never
                 }
@@ -249,7 +251,7 @@ fun StreamsScreen(
                     optionsPrompt = null
                 }
                 // Dismissing the question cancels the download.
-                chosenSubtitles = answer ?: return@async false
+                chosenSubtitles = answer ?: return false
             }
             if (available.isNotEmpty()) {
                 DownloadsRepository.rememberSubtitleSelection(offered = available, ticked = chosenSubtitles)
@@ -300,11 +302,30 @@ fun StreamsScreen(
                 ),
             )
         }
-        started
+        return started
+    }
+
+    // The wait between tapping Download and the options (or the queued toast) can be long: resolving
+    // a debrid link, asking subtitle add-ons, connecting a torrent. A dialog shows that something is
+    // happening; dismissing it cancels the download.
+    fun startStreamDownload(stream: StreamItem): Deferred<Boolean> {
+        val job = downloadScope.async {
+            preparingDownload = true
+            try {
+                prepareAndEnqueueDownload(stream)
+            } finally {
+                preparingDownload = false
+            }
+        }
+        preparingDownloadJob = job
+        return job
     }
 
     optionsPrompt?.let { DownloadOptionsDialog(it) }
     sharedDownloadPrompt?.let { SharedDownloadDialog(it) }
+    if (preparingDownload && optionsPrompt == null && sharedDownloadPrompt == null) {
+        DownloadPreparingDialog(onDismiss = { preparingDownloadJob?.cancel() })
+    }
 
     var preferredFilterApplied by remember(videoId) { mutableStateOf(false) }
     val episodeProgress = watchProgressUiState.progressForVideo(

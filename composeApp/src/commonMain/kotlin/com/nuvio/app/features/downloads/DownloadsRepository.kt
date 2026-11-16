@@ -26,7 +26,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -87,6 +89,7 @@ object DownloadsRepository {
     private val p2pScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     // Limits how many torrents download at once; the rest wait their turn (first come, first served).
     private val torrentSlots = Semaphore(maxConcurrentTorrentDownloads())
+    private val p2pStartGate = Mutex()
     private val pausedForBackground = mutableSetOf<String>()
     private var foregroundJob: Job? = null
     private var lastProgressPersistEpochMs = 0L
@@ -1285,15 +1288,19 @@ object DownloadsRepository {
             slotHeld = true
 
             stream = try {
-                withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
-                    P2pStreamingEngine.openDownloadStream(
-                        P2pStreamRequest(
-                            infoHash = infoHash,
-                            fileIdx = item.p2pFileIdx,
-                            filename = item.p2pFilename,
-                            trackers = item.p2pTrackers,
-                        ),
-                    )
+                // The engine opens one torrent at a time. Waiting for another torrent's start must not
+                // eat into this one's time to connect, or two slow torrents would both time out.
+                p2pStartGate.withLock {
+                    withTimeoutOrNull(P2P_START_TIMEOUT_MS) {
+                        P2pStreamingEngine.openDownloadStream(
+                            P2pStreamRequest(
+                                infoHash = infoHash,
+                                fileIdx = item.p2pFileIdx,
+                                filename = item.p2pFilename,
+                                trackers = item.p2pTrackers,
+                            ),
+                        )
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error

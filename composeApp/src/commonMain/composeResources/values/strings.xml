@@ -1972,6 +1972,10 @@
     <string name="downloads_enqueue_replaced">Replaced previous download</string>
     <string name="downloads_enqueue_shared">Already downloaded in another profile, shared</string>
     <string name="downloads_enqueue_started">Download started</string>
+    <string name="downloads_preparing">Preparing download…</string>
+    <string name="downloads_preparing_hint">Looking up the source and subtitles. Torrents can take a moment to connect.</string>
+    <string name="episodes_cd_downloaded">Downloaded</string>
+    <string name="episodes_cd_downloading">Downloading</string>
     <string name="downloads_enqueue_unsupported_format">Unsupported stream format for downloads</string>
     <string name="downloads_enqueue_p2p_unsupported">Torrent downloads are not available on this device yet</string>
     <string name="downloads_enqueue_p2p_disabled">Turn on P2P streaming in Settings → Playback to download torrents</string>
