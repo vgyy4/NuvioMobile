@@ -596,6 +596,22 @@ final class MPVPlayerViewController: UIViewController {
         // Drop late frames instead of stalling audio.
         checkError(mpv_set_option_string(mpv, "video-sync", "audio"))
         checkError(mpv_set_option_string(mpv, "framedrop", "vo"))
+        applyVeryLowEndDeviceProfile()
+    }
+
+    /// A7-class devices (iPad mini 2): a single slow GPU and two slow cores, so the lightest renderer
+    /// and the cheapest decode settings. Hardware H.264 decoding stays on; HEVC runs in software.
+    private func applyVeryLowEndDeviceProfile() {
+        guard Self.isVeryLowMemoryDevice else { return }
+        checkError(mpv_set_option_string(mpv, "vo", "gpu"))
+        checkError(mpv_set_option_string(mpv, "interpolation", "no"))
+        checkError(mpv_set_option_string(mpv, "deband", "no"))
+        checkError(mpv_set_option_string(mpv, "blend-subtitles", "no"))
+        checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "no"))
+        checkError(mpv_set_option_string(mpv, "tone-mapping", "clip"))
+        checkError(mpv_set_option_string(mpv, "vd-lavc-threads", "2"))
+        checkError(mpv_set_option_string(mpv, "vd-lavc-skipframe", "nonref"))
+        checkError(mpv_set_option_string(mpv, "audio-buffer", "0.2"))
     }
 
     // MARK: - MPV Setup

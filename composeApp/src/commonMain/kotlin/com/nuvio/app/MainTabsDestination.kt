@@ -1,5 +1,6 @@
 package com.nuvio.app
 
+import com.nuvio.app.core.ui.DevicePerformance
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -227,7 +228,8 @@ internal fun MainTabsDestination(
                         requests = requests,
                         state = state,
                         actions = tabActions,
-                        prewarmOtherTabs = iosComposeShell && initialHomeReady && rootRouteActive,
+                        prewarmOtherTabs = iosComposeShell && initialHomeReady && rootRouteActive &&
+                            !DevicePerformance.isVeryLowEnd,
                         modifier = Modifier
                             .fillMaxSize()
                             .then(if (isTabletLayout || navBarStyleSetting != NavBarStyle.CLASSIC) Modifier.hazeSource(state = navBarHazeState) else Modifier)

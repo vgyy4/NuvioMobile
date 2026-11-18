@@ -15,7 +15,15 @@ internal actual fun ImageLoader.Builder.configurePlatformImageLoader(): ImageLoa
         } else {
             LOW_END_IMAGE_MEMORY_CACHE_BYTES
         }
-        memoryCache { MemoryCache.Builder().maxSizeBytes(bytes).build() }
+        val builder = memoryCache { MemoryCache.Builder().maxSizeBytes(bytes).build() }
+        if (DevicePerformance.isVeryLowEnd) {
+            // One image is decoded and one fetched at a time: two A7 cores also run the UI and the player.
+            builder
+                .decoderCoroutineContext(kotlinx.coroutines.Dispatchers.Default.limitedParallelism(1))
+                .fetcherCoroutineContext(kotlinx.coroutines.Dispatchers.Default.limitedParallelism(2))
+        } else {
+            builder
+        }
     } else {
         this
     }

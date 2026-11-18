@@ -1,5 +1,6 @@
 package com.nuvio.app
 
+import com.nuvio.app.core.ui.DevicePerformance
 import com.nuvio.app.features.downloads.deleteDownloadLabel
 import com.nuvio.app.features.downloads.DeleteDownloadsRequest
 import com.nuvio.app.features.downloads.DeleteDownloadsKind
@@ -545,7 +546,8 @@ internal fun MainAppContent(
     launchOverlayState.targetState = launchOverlayVisible
 
     LaunchedEffect(initialHomeReady) {
-        if (!initialHomeReady || PosterOverlayWarmUpGate.completed) return@LaunchedEffect
+        // The warm-up costs CPU and memory a 1 GB / A7 device cannot spare.
+        if (!initialHomeReady || PosterOverlayWarmUpGate.completed || DevicePerformance.isVeryLowEnd) return@LaunchedEffect
         delay(3_000)
         // Wait for a quiet moment: no touch for a while, on a tab, no overlay in use.
         while (true) {
