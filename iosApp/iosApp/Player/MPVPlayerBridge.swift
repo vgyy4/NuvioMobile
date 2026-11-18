@@ -286,9 +286,18 @@ final class MPVPlayerViewController: UIViewController {
     private var usesStyledSubtitles = false
     private var styledSubtitleVisible = false
     private var lastSubtitleText = ""
-    private var pictureInPictureController: PlayerPictureInPictureController?
+    // Picture in picture needs iOS 15 (sample-buffer content source); older systems have none.
+    private var pictureInPictureStorage: AnyObject?
+    @available(iOS 15.0, *)
+    private var pictureInPictureController: PlayerPictureInPictureController? {
+        get { pictureInPictureStorage as? PlayerPictureInPictureController }
+        set { pictureInPictureStorage = newValue }
+    }
     var systemControlHandler: PlayerSystemControlHandler?
-    var keepsPlaybackInBackground: Bool { pictureInPictureController?.keepsPlaybackAlive == true }
+    var keepsPlaybackInBackground: Bool {
+        if #available(iOS 15.0, *) { return pictureInPictureController?.keepsPlaybackAlive == true }
+        return false
+    }
     private var lastAppliedDrawableSize: CGSize = .zero
     private var externallyManagedViewSize: CGSize?
     private var pendingSurfaceLayoutWorkItems: [DispatchWorkItem] = []
@@ -374,9 +383,11 @@ final class MPVPlayerViewController: UIViewController {
         }
         metalLayer.anchorPoint = CGPoint(x: 0, y: 0)
         metalLayer.position = .zero
-        let pip = PlayerPictureInPictureController(owner: self, metalLayer: metalLayer)
-        pictureInPictureController = pip
-        view.layer.addSublayer(pip.displayLayer)
+        if #available(iOS 15.0, *) {
+            let pip = PlayerPictureInPictureController(owner: self, metalLayer: metalLayer)
+            pictureInPictureController = pip
+            view.layer.addSublayer(pip.displayLayer)
+        }
         view.layer.addSublayer(metalLayer)
         layoutMetalLayer()
 
@@ -519,7 +530,7 @@ final class MPVPlayerViewController: UIViewController {
         metalLayer.contentsScale = scale
         metalLayer.position = .zero
         metalLayer.bounds = CGRect(origin: .zero, size: bounds.size)
-        pictureInPictureController?.displayLayer.frame = bounds
+        if #available(iOS 15.0, *) { pictureInPictureController?.displayLayer.frame = bounds }
         let drawableSizeChanged = drawableSize != lastAppliedDrawableSize
         if drawableSizeChanged {
             // mpv's moltenvk context polls drawableSize and resizes its swapchain.
@@ -546,7 +557,16 @@ final class MPVPlayerViewController: UIViewController {
 
     /// Bounds mpv's demuxer cache by RAM. mpv's defaults are 150 MiB forward + 150 MiB back, which
     /// is far more than a streaming player needs and counts against the jetsam limit.
+    /// 1 GB devices (iPad mini 2, iPad Air 1, iPhone 5s/6): half of the low-memory budget.
+    private static let isVeryLowMemoryDevice: Bool =
+        ProcessInfo.processInfo.physicalMemory <= 1_342_177_280 // 1.25 GiB
+
     private func applyDemuxerCacheLimits() {
+        if Self.isVeryLowMemoryDevice {
+            checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "24MiB"))
+            checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "8MiB"))
+            return
+        }
         if Self.isLowMemoryDevice {
             checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", "48MiB"))
             checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "16MiB"))
@@ -689,7 +709,7 @@ final class MPVPlayerViewController: UIViewController {
 
     @objc private func enterBackground() {
         guard mpv != nil else { return }
-        if pictureInPictureController?.enteredBackground() == true { return }
+        if #available(iOS 15.0, *), pictureInPictureController?.enteredBackground() == true { return }
         pauseBackgroundPlayback()
     }
 
@@ -704,8 +724,7 @@ final class MPVPlayerViewController: UIViewController {
 
     @objc private func enterForeground() {
         guard mpv != nil else { return }
-        let wasInPictureInPicture = pictureInPictureController?.enteredForeground() == true
-        if wasInPictureInPicture { return }
+        if #available(iOS 15.0, *), pictureInPictureController?.enteredForeground() == true { return }
         restoreBackgroundVideo()
         playPlayback()
     }
@@ -1126,8 +1145,10 @@ final class MPVPlayerViewController: UIViewController {
     }
 
     func destroyPlayer() {
-        pictureInPictureController?.invalidate()
-        pictureInPictureController = nil
+        if #available(iOS 15.0, *) {
+            pictureInPictureController?.invalidate()
+            pictureInPictureController = nil
+        }
         NotificationCenter.default.removeObserver(self)
         UIApplication.shared.endReceivingRemoteControlEvents()
         resignFirstResponder()
@@ -1194,7 +1215,7 @@ final class MPVPlayerViewController: UIViewController {
     }
 
     private func syncNowPlayingPlaybackState(isPlaying: Bool, force: Bool = false) {
-        pictureInPictureController?.updatePlaybackState()
+        if #available(iOS 15.0, *) { pictureInPictureController?.updatePlaybackState() }
         nowPlayingController.syncPlayback(
             positionMs: positionMs,
             durationMs: durationMs,

@@ -4,6 +4,7 @@ import CoreMedia
 let playerSceneDidActivateNotification = Notification.Name("NuvioPlayerSceneDidActivate")
 
 /// PiP presents MPV's existing VideoToolbox buffers; MPV remains the audio and playback clock owner.
+@available(iOS 15.0, *)
 final class PlayerPictureInPictureController: NSObject,
     AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
     let displayLayer: AVSampleBufferDisplayLayer

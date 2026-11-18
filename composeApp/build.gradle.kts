@@ -409,6 +409,15 @@ kotlin {
             baseName = "ComposeApp"
             isStatic = true
             freeCompilerArgs += listOf("-Xbinary=bundleId=$iosFrameworkBundleId")
+            // Lowers the iOS floor of the compiled code (Kotlin/Native defaults to iOS 15). Used by the
+            // iPad mini 2 build, whose last system is iOS 12.
+            providers.gradleProperty("nuvio.ios.minVersion").orNull?.let { minVersion ->
+                freeCompilerArgs += listOf(
+                    "-Xoverride-konan-properties=" +
+                        "osVersionMin.ios_arm64=$minVersion;osVersionMin.ios_simulator_arm64=$minVersion;" +
+                        "osVersionMin.ios_x64=$minVersion"
+                )
+            }
             if (iosDistribution == "full") {
                 linkerOpts(
                     "-lc++",

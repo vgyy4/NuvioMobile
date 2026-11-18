@@ -1,4 +1,6 @@
 name: iOS 15 Unsigned IPA
+# This branch (ipad-mini-2) builds the iPad mini 2 variant: iOS 12 floor, so the file name and
+# workflow name stay the same (the workflow is registered under this name).
 
 on:
   workflow_dispatch:
@@ -15,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build unsigned iOS 15 IPA
+    name: Build unsigned iOS 12 IPA (iPad mini 2)
     runs-on: macos-latest
     timeout-minutes: 150
     env:
@@ -25,6 +27,7 @@ jobs:
       NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
       NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
       NUVIO_ENGINE_ROOT: ${{ github.workspace }}/nuvio-engine
+      NUVIO_IOS_DEPLOYMENT_TARGET: "12.0"
       RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
 
     steps:
@@ -38,13 +41,22 @@ jobs:
       # iOS only needs MPVKit, so initialise that one recursively.
       - name: Initialise MPVKit submodule
         working-directory: NuvioMobile
-        run: git submodule update --init --recursive MPVKit
+        run: |
+          git submodule update --init --recursive MPVKit
+          # MPVKit declares iOS 14 as its platform floor; its binaries load on older systems as long
+          # as the symbols they use exist, so let SwiftPM accept the iOS 12 target.
+          sed -i '' 's/\.iOS(\.v14)/.iOS(.v12)/' MPVKit/Package.swift
+          grep -n "platforms" MPVKit/Package.swift
+
+      - name: Lower the Kotlin/Native iOS floor
+        working-directory: NuvioMobile
+        run: echo "nuvio.ios.minVersion=${NUVIO_IOS_DEPLOYMENT_TARGET}" >> gradle.properties
 
       - name: Check out nuvio-engine
         uses: actions/checkout@v4
         with:
           repository: vgyy4/nuvio-engine
-          ref: ccr-perf-9ba47f5b
+          ref: ipad-mini-2
           path: nuvio-engine
 
       - name: Select newest Xcode
@@ -73,7 +85,7 @@ jobs:
           path: nuvio-engine/platform/apple/NuvioEngine.xcframework
           key: engine-xcframework-${{ runner.os }}-${{ runner.arch }}-${{ steps.engine-rev.outputs.sha }}
 
-      - name: Build NuvioEngine.xcframework (iOS 15.0)
+      - name: Build NuvioEngine.xcframework (iOS 12.0)
         if: steps.engine-cache.outputs.cache-hit != 'true'
         working-directory: nuvio-engine
         run: |
@@ -150,7 +162,7 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/logs"
           ./scripts/build-ios-ipa.sh 2>&1 | tee "${GITHUB_WORKSPACE}/logs/build-ios-ipa.log"
 
-      - name: Verify MinimumOSVersion is 15.0
+      - name: Verify MinimumOSVersion is 12.0
         working-directory: NuvioMobile
         run: |
           app_path="$(find build -type d -name Nuvio.app -path '*-iphoneos/*' -print -quit)"
@@ -158,15 +170,26 @@ jobs:
           minimum="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "${app_path}/Info.plist")"
           echo "MinimumOSVersion=${minimum}"
           echo "MinimumOSVersion: ${minimum}" >> "${GITHUB_STEP_SUMMARY}"
-          if [[ "${minimum}" != "15.0" ]]; then
-            echo "Expected MinimumOSVersion 15.0 but found ${minimum}" >&2
+          if [[ "${minimum}" != "12.0" ]]; then
+            echo "Expected MinimumOSVersion 12.0 but found ${minimum}" >&2
             exit 1
           fi
+
+      # Informational: system symbols the app binds at launch that iOS 12 does not have.
+      - name: List symbols newer than iOS 12
+        if: always()
+        working-directory: NuvioMobile
+        run: |
+          app_path="$(find build -type d -name Nuvio.app -path '*-iphoneos/*' -print -quit)"
+          test -n "${app_path}" || exit 0
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${app_path}/Info.plist")"
+          otool -l "${app_path}/${executable}" | grep -A4 "LC_BUILD_VERSION" | head -8 || true
+          .github/ios12/check-newer-symbols.sh "${app_path}/${executable}" "${GITHUB_WORKSPACE}/logs/ios12-newer-symbols.txt" | tee -a "${GITHUB_STEP_SUMMARY}" || true
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: nuvio-ios15-unsigned-ipa
+          name: nuvio-ipad-mini-2-unsigned-ipa
           path: NuvioMobile/build/ios-ipa/*.ipa
           if-no-files-found: error
           retention-days: 14

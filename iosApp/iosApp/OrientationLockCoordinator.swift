@@ -23,7 +23,11 @@ final class NetworkPathBridge {
     }
 }
 
-final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+@UIApplicationMain
+final class OrientationLockAppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    // iOS 12 has no scenes: the app owns its window.
+    var window: UIWindow?
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -32,6 +36,12 @@ final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserN
         NetworkPathBridge.shared.start()
         DownloadsLiveActivityManager.shared.start()
         UNUserNotificationCenter.current().delegate = self
+
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.backgroundColor = nuvioBackgroundColor
+        window.rootViewController = NuvioComposeHost.wrap(MainViewControllerKt.MainViewController())
+        window.makeKeyAndVisible()
+        self.window = window
         return true
     }
 
@@ -40,6 +50,19 @@ final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserN
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         OrientationLockCoordinator.shared.supportedOrientations
+    }
+
+    func application(
+        _ app: UIApplication,
+        open url: URL,
+        options: [UIApplication.OpenURLOptionsKey: Any] = [:]
+    ) -> Bool {
+        AppUrlBridgeKt.handleAppUrl(url: url.absoluteString)
+        return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        NotificationCenter.default.post(name: playerSceneDidActivateNotification, object: nil)
     }
 
     func application(
@@ -62,7 +85,11 @@ final class OrientationLockAppDelegate: NSObject, UIApplicationDelegate, UNUserN
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        if #available(iOS 14.0, *) {
+            completionHandler([.banner, .list, .sound])
+        } else {
+            completionHandler([.alert, .sound])
+        }
     }
 
     func userNotificationCenter(
@@ -134,7 +161,8 @@ final class OrientationLockCoordinator {
     }
 
     private var preferredLandscapeOrientation: UIInterfaceOrientation {
-        if let sceneOrientation = UIApplication.shared.connectedScenes
+        if #available(iOS 13.0, *),
+           let sceneOrientation = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.interfaceOrientation })
             .first(where: \.isLandscape) {
             return sceneOrientation

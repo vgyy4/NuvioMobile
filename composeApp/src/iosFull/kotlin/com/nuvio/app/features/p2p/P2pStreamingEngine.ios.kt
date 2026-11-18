@@ -78,8 +78,12 @@ private const val CacheStatsPollIntervalMs = 1_000L
 // Devices with <= 2.5 GiB of RAM (iPad Air 2, iPhone 6s/7/8 ...) get a smaller in-memory
 // piece cache so the engine does not push the app towards a jetsam kill.
 private const val LowMemoryDeviceThresholdBytes = 2_684_354_560uL
+private const val VeryLowMemoryDeviceThresholdBytes = 1_342_177_280uL
 private val MemoryCacheCapacityBytes: Long =
-    if (NSProcessInfo.processInfo.physicalMemory <= LowMemoryDeviceThresholdBytes) {
+    if (NSProcessInfo.processInfo.physicalMemory <= VeryLowMemoryDeviceThresholdBytes) {
+        // 1 GB devices (iPad mini 2).
+        12L * 1024L * 1024L
+    } else if (NSProcessInfo.processInfo.physicalMemory <= LowMemoryDeviceThresholdBytes) {
         24L * 1024L * 1024L
     } else {
         64L * 1024L * 1024L

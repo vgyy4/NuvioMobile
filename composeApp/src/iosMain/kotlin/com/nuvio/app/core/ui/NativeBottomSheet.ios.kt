@@ -22,9 +22,9 @@ import platform.UIKit.UIAdaptivePresentationControllerDelegateProtocol
 import platform.UIKit.UIColor
 import platform.UIKit.UIModalPresentationPageSheet
 import platform.UIKit.UIPresentationController
+import platform.UIKit.UIDevice
 import platform.UIKit.UISheetPresentationController
 import platform.UIKit.UISheetPresentationControllerDetent
-import platform.UIKit.UISheetPresentationControllerDetentIdentifierMedium
 import platform.UIKit.UIViewController
 import platform.UIKit.presentationController
 import platform.darwin.NSObject
@@ -107,7 +107,12 @@ internal actual fun NuvioNativeModalBottomSheet(
         val sheetController = contentController
         sheetController.modalPresentationStyle = UIModalPresentationPageSheet
         sheetController.view.backgroundColor = latestContainerColor.value.toUIColor()
-        (sheetController.presentationController() as? UISheetPresentationController)?.apply {
+        // Sheet detents exist from iOS 15; below that the sheet is a plain page sheet. (Also the C
+        // constant for the medium identifier is left out: it would be bound at launch and iOS 12
+        // does not have it. The smallest detent, the medium one, is selected by default.)
+        val detentsSupported =
+            (UIDevice.currentDevice.systemVersion.substringBefore(".").toIntOrNull() ?: 0) >= 15
+        (if (detentsSupported) sheetController.presentationController() as? UISheetPresentationController else null)?.apply {
             if (fullHeight) {
                 detents = listOf(UISheetPresentationControllerDetent.largeDetent())
             } else {
@@ -115,7 +120,6 @@ internal actual fun NuvioNativeModalBottomSheet(
                     UISheetPresentationControllerDetent.mediumDetent(),
                     UISheetPresentationControllerDetent.largeDetent(),
                 )
-                selectedDetentIdentifier = UISheetPresentationControllerDetentIdentifierMedium
             }
             prefersGrabberVisible = showDragHandle
             prefersScrollingExpandsWhenScrolledToEdge = false

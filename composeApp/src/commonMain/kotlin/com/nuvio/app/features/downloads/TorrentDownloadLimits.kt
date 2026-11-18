@@ -8,7 +8,11 @@ import kotlinx.atomicfu.locks.synchronized
  * How many torrents download at the same time. More wait their turn in the order they were
  * started. Fewer on low-end devices, where several torrents at once would starve everything else.
  */
-internal fun maxConcurrentTorrentDownloads(): Int = if (DevicePerformance.isLowEnd) 2 else 3
+internal fun maxConcurrentTorrentDownloads(): Int = when {
+    DevicePerformance.isVeryLowEnd -> 1
+    DevicePerformance.isLowEnd -> 2
+    else -> 3
+}
 
 internal class TorrentDiskShortfall(val neededBytes: Long, val freeBytes: Long)
 

@@ -1,23 +1,19 @@
-import Combine
 import UIKit
 import ComposeApp
 
-@MainActor
-final class SystemUI: ObservableObject {
+/// Tracks the full-screen player so the root controller can hide the home indicator, the status bar
+/// and the screen-edge gestures. iOS 12 build: no SwiftUI or Combine, plain properties.
+final class SystemUI {
     static let shared = SystemUI()
 
     private init() {}
 
     private(set) weak var activePlayer: UIViewController?
-    @Published private(set) var isPlayerImmersive = false
-    @Published private(set) var pictureInPictureMessage: String?
-    private var localizedPictureInPictureMessage: String?
+    private(set) var isPlayerImmersive = false
 
     func playerDidBecomeVisible(_ player: UIViewController) {
         guard activePlayer !== player else { return }
         activePlayer = player
-        localizedPictureInPictureMessage = LocalizedUiTextKt.localizedPlayerPictureInPicture()
-        pictureInPictureMessage = nil
         isPlayerImmersive = true
         refresh()
     }
@@ -25,24 +21,17 @@ final class SystemUI: ObservableObject {
     func playerDidBecomeHidden(_ player: UIViewController) {
         guard activePlayer === player || activePlayer == nil else { return }
         activePlayer = nil
-        localizedPictureInPictureMessage = nil
         isPlayerImmersive = false
-        pictureInPictureMessage = nil
         refresh()
     }
 
-    func setPictureInPicturePlaceholder(_ player: UIViewController, visible: Bool) {
-        guard activePlayer === player else { return }
-        pictureInPictureMessage = visible ? localizedPictureInPictureMessage : nil
-    }
+    /// Picture in picture is not offered on this build, so there is no placeholder to show.
+    func setPictureInPicturePlaceholder(_ player: UIViewController, visible: Bool) {}
 
     private func refresh() {
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            for window in windowScene.windows {
-                guard let root = window.rootViewController else { continue }
-                markNeedsUpdate(root)
-            }
+        for window in UIApplication.shared.windows {
+            guard let root = window.rootViewController else { continue }
+            markNeedsUpdate(root)
         }
     }
 

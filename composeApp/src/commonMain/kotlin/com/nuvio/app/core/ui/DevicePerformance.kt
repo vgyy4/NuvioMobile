@@ -6,4 +6,7 @@ package com.nuvio.app.core.ui
  */
 internal expect object DevicePerformance {
     val isLowEnd: Boolean
+
+    /** About 1 GB of RAM (iPad mini 2, iPad Air 1, iPhone 5s/6): everything gets the smallest budgets. */
+    val isVeryLowEnd: Boolean
 }
