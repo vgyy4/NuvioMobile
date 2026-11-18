@@ -92,13 +92,13 @@ jobs:
           set -o pipefail
           # Source downloads (GitHub releases) intermittently return 504; the
           # scripts skip already-downloaded archives, so retrying is safe.
-          for attempt in 1 2 3 4 5 6 7 8; do
+          for attempt in 1 2; do
             if NUVIO_BUILD_JOBS="$(sysctl -n hw.ncpu)" ./scripts/build-apple-xcframework.sh; then
               break
             fi
-            [[ "${attempt}" == 8 ]] && exit 1
-            echo "Attempt ${attempt} failed; retrying in $((attempt * 60))s"
-            sleep $((attempt * 60))
+            [[ "${attempt}" == 2 ]] && exit 1
+            echo "Attempt ${attempt} failed; retrying in 30s"
+            sleep 30
           done
           ./scripts/verify-apple-xcframework.sh
           ./scripts/smoke-apple-xcframework.sh
