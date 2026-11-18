@@ -1,6 +1,7 @@
 package com.nuvio.app
 
 import com.nuvio.app.core.ui.DevicePerformance
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -107,6 +108,8 @@ internal fun MainTabsDestination(
             derivedStateOf { imeInsets.getBottom(density) > 0 }
         }
         val navBarHazeState = rememberHazeState()
+        // Reduced-effects devices draw the bars on a solid fill instead of blurring the page behind them.
+        val navBarHazeStateOrNull = if (ReduceEffects) null else navBarHazeState
         val storedNavBarStyle by remember { ThemeSettingsRepository.navBarStyle }.collectAsStateWithLifecycle()
         // The classic flat bar is not offered on iPad (the setting is hidden on iOS); tablets use
         // the floating bar.
@@ -148,7 +151,7 @@ internal fun MainTabsDestination(
                         onClick = onClick,
                         onProfileSelected = onProfileSelected,
                         onAddProfileRequested = onAddProfileRequested,
-                        hazeState = navBarHazeState,
+                        hazeState = navBarHazeStateOrNull,
                         popupBelowAnchor = topBarOnTablet,
                     )
                 },
@@ -212,7 +215,7 @@ internal fun MainTabsDestination(
             Box(modifier = Modifier.fillMaxSize()) {
                 // Below the page content, which is opaque, so it is never seen.
                 NavBarGlassWarmUpHost(
-                    running = { navBarWarmUpRunning && rootRouteActive },
+                    running = { navBarWarmUpRunning && rootRouteActive && !ReduceEffects },
                     hazeState = navBarHazeState,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -232,7 +235,7 @@ internal fun MainTabsDestination(
                             !DevicePerformance.isVeryLowEnd,
                         modifier = Modifier
                             .fillMaxSize()
-                            .then(if (isTabletLayout || navBarStyleSetting != NavBarStyle.CLASSIC) Modifier.hazeSource(state = navBarHazeState) else Modifier)
+                            .then(if (!ReduceEffects && (isTabletLayout || navBarStyleSetting != NavBarStyle.CLASSIC)) Modifier.hazeSource(state = navBarHazeState) else Modifier)
                             .then(if (navBarStyleSetting == NavBarStyle.ADAPTIVE) Modifier.nestedScroll(navBarScrollState.nestedScrollConnection) else Modifier)
                             .padding(innerPadding),
                     )
@@ -243,7 +246,7 @@ internal fun MainTabsDestination(
                     FloatingNavigationBar(
                         modifier = Modifier.align(Alignment.TopCenter).widthIn(max = 416.dp),
                         scrollState = tabletNavBarScrollState,
-                        hazeState = navBarHazeState,
+                        hazeState = navBarHazeStateOrNull,
                         contentPadding = PaddingValues(
                             top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 10.dp,
                             bottom = 8.dp,
@@ -272,9 +275,9 @@ internal fun MainTabsDestination(
                             FloatingNavigationBar(
                                 modifier = if (bottomBarOnTablet) Modifier.widthIn(max = 416.dp) else Modifier,
                                 scrollState = navBarScrollState,
-                                hazeState = navBarHazeState,
+                                hazeState = navBarHazeStateOrNull,
                                 items = floatingNavigationItems,
-                                glowEnabled = navBarGlowEnabled,
+                                glowEnabled = navBarGlowEnabled && !ReduceEffects,
                             )
                         }
                     }

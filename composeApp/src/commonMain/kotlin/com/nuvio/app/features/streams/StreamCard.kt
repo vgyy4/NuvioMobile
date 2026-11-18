@@ -1,5 +1,6 @@
 package com.nuvio.app.features.streams
 
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
@@ -76,11 +77,17 @@ internal fun StreamCard(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 68.dp)
-            .shadow(
-                elevation = 2.dp,
-                shape = cardShape,
-                ambientColor = Color.Black.copy(alpha = 0.04f),
-                spotColor = Color.Black.copy(alpha = 0.04f),
+            .then(
+                if (ReduceEffects) {
+                    Modifier
+                } else {
+                    Modifier.shadow(
+                        elevation = 2.dp,
+                        shape = cardShape,
+                        ambientColor = Color.Black.copy(alpha = 0.04f),
+                        spotColor = Color.Black.copy(alpha = 0.04f),
+                    )
+                },
             )
             .clip(cardShape)
             .background(

@@ -1,5 +1,6 @@
 package com.nuvio.app.features.streams
 
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -187,11 +188,17 @@ internal fun TabletStreamsLayout(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(RoundedCornerShape(24.dp))
-                        .hazeEffect(state = hazeState) {
-                            inputScale = HazeInputScale.Fixed(0.66f)
-                            blurRadius = 56.dp
-                        }
-                        .background(Color.Black.copy(alpha = 0.36f)),
+                        .then(
+                            if (ReduceEffects) {
+                                Modifier
+                            } else {
+                                Modifier.hazeEffect(state = hazeState) {
+                                    inputScale = HazeInputScale.Fixed(0.66f)
+                                    blurRadius = 56.dp
+                                }
+                            },
+                        )
+                        .background(Color.Black.copy(alpha = if (ReduceEffects) 0.78f else 0.36f)),
                 ) {
                     CompositionLocalProvider(LocalOnBackdrop provides true) {
                         Column(

@@ -1,5 +1,7 @@
 package com.nuvio.app.features.player
 
+import androidx.compose.runtime.mutableFloatStateOf
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -72,16 +74,20 @@ internal fun OpeningOverlay(
         animationSpec = tween(durationMillis = 700, delayMillis = 400, easing = LinearEasing),
         label = "openingOverlayContentAlpha",
     )
-    val pulse = rememberInfiniteTransition(label = "openingOverlayContentPulse")
-    val contentScale by pulse.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.04f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "openingOverlayContentScale",
-    )
+    // A slow breathing pulse; static where effects are reduced (it re-draws the overlay each frame).
+    val contentScale by if (ReduceEffects) {
+        remember { mutableFloatStateOf(1f) }
+    } else {
+        rememberInfiniteTransition(label = "openingOverlayContentPulse").animateFloat(
+            initialValue = 1f,
+            targetValue = 1.04f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2000, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "openingOverlayContentScale",
+        )
+    }
     var logoLoadError by remember(logo) { mutableStateOf(false) }
     val logoUrl = logo?.takeIf { it.isNotBlank() }
 

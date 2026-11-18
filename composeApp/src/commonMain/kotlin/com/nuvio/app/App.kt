@@ -1,5 +1,6 @@
 package com.nuvio.app
 
+import com.nuvio.app.core.ui.DevicePerformance
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -75,7 +76,7 @@ internal fun AppEnvironment(content: @Composable () -> Unit) {
     if (!platformProvidesImageLoader) {
         setSingletonImageLoaderFactory { context ->
             ImageLoader.Builder(context)
-                .crossfade(true)
+                .crossfade(!DevicePerformance.isVeryLowEnd)
                 .diskCachePolicy(CachePolicy.ENABLED)
                 .memoryCachePolicy(CachePolicy.ENABLED)
                 .components {

@@ -259,6 +259,7 @@ private data class GlassWindowShape(
  * is the live [window] rect.
  */
 private fun Modifier.glassBarShadow(window: GlassWindow): Modifier = drawBehind {
+    if (ReduceEffects) return@drawBehind
     val windowWidth = window.width
     val windowHeight = window.height
     if (windowWidth <= 0f || windowHeight <= 0f) return@drawBehind

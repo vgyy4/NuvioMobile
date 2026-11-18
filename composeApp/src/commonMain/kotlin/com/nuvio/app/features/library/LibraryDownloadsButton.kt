@@ -1,5 +1,6 @@
 package com.nuvio.app.features.library
 
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -59,12 +60,17 @@ private fun FlowingDownloadIcon() {
     val dimAlpha = MaterialTheme.nuvio.opacity.overlayLight
     val colors = palette.accentGradient.takeIf { it.size >= 2 }
         ?: listOf(palette.secondary, palette.secondary.copy(alpha = dimAlpha))
-    val phase by rememberInfiniteTransition(label = "downloadsFlow").animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(durationMillis = 1600, easing = LinearEasing)),
-        label = "downloadsFlowPhase",
-    )
+    val animatedPhase = if (ReduceEffects) {
+        null
+    } else {
+        rememberInfiniteTransition(label = "downloadsFlow").animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 1600, easing = LinearEasing)),
+            label = "downloadsFlowPhase",
+        )
+    }
+    val phase = animatedPhase?.value ?: 0.5f
     DownloadIcon(
         modifier = Modifier
             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }

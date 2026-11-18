@@ -280,7 +280,7 @@ fun NuvioPosterZoomActionOverlay(
         // radius a quarter-resolution input is visually indistinguishable, and costs a fraction on
         // older GPUs, so low-end devices pin it there. Other devices keep the automatic choice.
         val blurInputScale = if (DevicePerformance.isLowEnd) HazeInputScale.Fixed(0.25f) else HazeInputScale.Auto
-        Box(
+        if (!ReduceEffects) Box(
             modifier = Modifier
                 .fillMaxSize()
                 .hazeEffect(state = hazeState) {
@@ -299,7 +299,7 @@ fun NuvioPosterZoomActionOverlay(
                 // Drawn, not composed: reading the animation here would recompose the whole
                 // overlay (menu rows included) on every frame of the fade.
                 .drawBehind {
-                    drawRect(Color.Black.copy(alpha = 0.45f * scrim.value.coerceIn(0f, 1f)))
+                    drawRect(Color.Black.copy(alpha = (if (ReduceEffects) 0.72f else 0.45f) * scrim.value.coerceIn(0f, 1f)))
                 },
         )
 

@@ -1,5 +1,6 @@
 package com.nuvio.app.features.profiles
 
+import com.nuvio.app.core.ui.nuvioShadow
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -106,7 +107,7 @@ internal fun ProfilePopupContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { panelBounds = it.boundsInParent() }
-                    .shadow(12.dp, shape)
+                    .nuvioShadow(12.dp, shape)
                     .clip(shape)
                     .then(
                         if (hazeState != null) {

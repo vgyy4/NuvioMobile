@@ -1,5 +1,6 @@
 package com.nuvio.app
 
+import com.nuvio.app.core.ui.ReduceEffects
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -77,7 +78,7 @@ internal fun RootTabHost(
             }
         }
         // Panes created after the first one (first visit of a tab) fade in too; the initial tab does not.
-        val animateNewPanes = visitedTabs.isNotEmpty()
+        val animateNewPanes = visitedTabs.isNotEmpty() && !ReduceEffects
         SideEffect { visitedTabs += selectedTab }
 
         Layout(

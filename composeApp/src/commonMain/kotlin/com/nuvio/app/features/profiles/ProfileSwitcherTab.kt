@@ -1,5 +1,6 @@
 package com.nuvio.app.features.profiles
 
+import com.nuvio.app.core.ui.nuvioShadow
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -429,7 +430,7 @@ fun NativeProfileSwitcherPopup(
                                 scaleY = popupScale.value
                                 translationY = popupTranslateY.value
                             }
-                            .shadow(tokens.elevation.overlay, tokens.shapes.sheet)
+                            .nuvioShadow(tokens.elevation.overlay, tokens.shapes.sheet)
                             .background(
                                 tokens.colors.surfaceSheet,
                                 tokens.shapes.sheet,

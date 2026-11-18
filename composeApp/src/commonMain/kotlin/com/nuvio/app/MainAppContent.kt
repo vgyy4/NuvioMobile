@@ -1,6 +1,7 @@
 package com.nuvio.app
 
 import com.nuvio.app.core.ui.DevicePerformance
+import com.nuvio.app.core.ui.ReduceEffects
 import com.nuvio.app.features.downloads.deleteDownloadLabel
 import com.nuvio.app.features.downloads.DeleteDownloadsRequest
 import com.nuvio.app.features.downloads.DeleteDownloadsKind
@@ -236,7 +237,7 @@ internal fun MainAppContent(
             MetaScreenSettingsRepository.uiState
         }.collectAsStateWithLifecycle()
         val posterNavigationEnabled = supportsPosterNavigationMotion &&
-            metaScreenSettings.posterTransitionEnabled && onNavigate == null
+            metaScreenSettings.posterTransitionEnabled && onNavigate == null && !ReduceEffects
         val routeDisposalDecorator = remember {
             RouteDisposalNavEntryDecorator<NavKey> { key ->
                 if (key is AppRoute) disposeRoute(key)
@@ -2444,7 +2445,7 @@ private fun PosterOverlayHazeSourceBox(
 ) {
     Box(
         modifier = modifier
-            .then(if (active()) Modifier.hazeSource(state = hazeState) else Modifier)
+            .then(if (active() && !ReduceEffects) Modifier.hazeSource(state = hazeState) else Modifier)
             .background(MaterialTheme.nuvio.colors.background),
         content = content,
     )
