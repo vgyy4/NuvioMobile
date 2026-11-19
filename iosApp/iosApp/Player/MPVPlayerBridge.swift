@@ -281,7 +281,7 @@ final class MPVPlayerViewController: UIViewController {
     }
 
     private let errorStateLock = NSLock()
-    private var metalLayer = MetalLayer()
+    private let videoView = MPVGLESVideoView()
     var subtitleTextHandler: SubtitleTextHandler?
     private var usesStyledSubtitles = false
     private var styledSubtitleVisible = false
@@ -374,22 +374,13 @@ final class MPVPlayerViewController: UIViewController {
         view.backgroundColor = .black
         view.layer.masksToBounds = true
 
-        metalLayer.contentsGravity = .resize
-        metalLayer.contentsScale = view.window?.screen.nativeScale ?? UIScreen.main.nativeScale
-        metalLayer.framebufferOnly = true
-        metalLayer.backgroundColor = UIColor.black.cgColor
-        if #available(iOS 16.0, *) {
-            metalLayer.wantsExtendedDynamicRangeContent = true
-        }
-        metalLayer.anchorPoint = CGPoint(x: 0, y: 0)
-        metalLayer.position = .zero
-        if #available(iOS 15.0, *) {
-            let pip = PlayerPictureInPictureController(owner: self, metalLayer: metalLayer)
-            pictureInPictureController = pip
-            view.layer.addSublayer(pip.displayLayer)
-        }
-        view.layer.addSublayer(metalLayer)
-        layoutMetalLayer()
+        // The iOS 12 video path draws with OpenGL ES. Picture in picture is not available: it fed on
+        // the frames of the Vulkan renderer, and AVKit's sample-buffer PiP needs iOS 15 anyway.
+        videoView.contentScaleFactor = view.window?.screen.nativeScale ?? UIScreen.main.nativeScale
+        videoView.frame = view.bounds
+        videoView.isUserInteractionEnabled = false
+        view.addSubview(videoView)
+        layoutVideoSurface()
 
         setupMpv()
         activateAudioSessionForPlayback()
@@ -408,7 +399,7 @@ final class MPVPlayerViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        layoutMetalLayer()
+        layoutVideoSurface()
         attemptStartPendingLoad()
     }
 
@@ -482,7 +473,7 @@ final class MPVPlayerViewController: UIViewController {
         }
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        layoutMetalLayer()
+        layoutVideoSurface()
 
         if scheduleDeferredPasses {
             scheduleDeferredSurfaceLayoutPasses()
@@ -515,7 +506,7 @@ final class MPVPlayerViewController: UIViewController {
         }
     }
 
-    private func layoutMetalLayer() {
+    private func layoutVideoSurface() {
         let bounds = CGRect(origin: .zero, size: externallyManagedViewSize ?? view.bounds.size)
         guard bounds.width > 1, bounds.height > 1 else { return }
 
@@ -527,14 +518,11 @@ final class MPVPlayerViewController: UIViewController {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        metalLayer.contentsScale = scale
-        metalLayer.position = .zero
-        metalLayer.bounds = CGRect(origin: .zero, size: bounds.size)
-        if #available(iOS 15.0, *) { pictureInPictureController?.displayLayer.frame = bounds }
+        videoView.contentScaleFactor = scale
+        videoView.frame = bounds
         let drawableSizeChanged = drawableSize != lastAppliedDrawableSize
         if drawableSizeChanged {
-            // mpv's moltenvk context polls drawableSize and resizes its swapchain.
-            metalLayer.drawableSize = drawableSize
+            // The view reallocates its renderbuffer from its layout; mpv redraws at the new size.
             lastAppliedDrawableSize = drawableSize
         }
         CATransaction.commit()
@@ -603,11 +591,9 @@ final class MPVPlayerViewController: UIViewController {
     /// and the cheapest decode settings. Hardware H.264 decoding stays on; HEVC runs in software.
     private func applyVeryLowEndDeviceProfile() {
         guard Self.isVeryLowMemoryDevice else { return }
-        checkError(mpv_set_option_string(mpv, "vo", "gpu"))
         checkError(mpv_set_option_string(mpv, "interpolation", "no"))
         checkError(mpv_set_option_string(mpv, "deband", "no"))
         checkError(mpv_set_option_string(mpv, "blend-subtitles", "no"))
-        checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "no"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "clip"))
         checkError(mpv_set_option_string(mpv, "vd-lavc-threads", "2"))
         checkError(mpv_set_option_string(mpv, "vd-lavc-skipframe", "nonref"))
@@ -625,11 +611,9 @@ final class MPVPlayerViewController: UIViewController {
 
         checkError(mpv_request_log_messages(mpv, "warn"))
 
-        var layerPointer = Int64(Int(bitPattern: Unmanaged.passUnretained(metalLayer).toOpaque()))
-        checkError(mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &layerPointer))
-        checkError(mpv_set_option_string(mpv, "vo", "gpu-next"))
-        checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
-        checkError(mpv_set_option_string(mpv, "gpu-context", "moltenvk"))
+        // OpenGL ES through the render API (MoltenVK/Vulkan needs iOS 15); the context is attached
+        // right after mpv_initialize.
+        checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
         checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
         // iOS can invalidate the VideoToolbox session (e.g. Notification Center during PiP).
         // FFmpeg recreates it at the next frames; keep hardware decoding meanwhile.
@@ -640,24 +624,21 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "ao", Self.defaultAudioOutput))
         checkError(mpv_set_option_string(mpv, "audio-channels", "auto"))
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "yes"))
-        checkError(mpv_set_option_string(mpv, "vulkan-swap-mode", "fifo"))
-        checkError(mpv_set_option_string(mpv, "vulkan-queue-count", "1"))
-        checkError(mpv_set_option_string(mpv, "vulkan-async-compute", "no"))
-        checkError(mpv_set_option_string(mpv, "vulkan-async-transfer", "no"))
-        checkError(mpv_set_option_string(mpv, "vulkan-disable-interop", "yes"))
         checkError(mpv_set_option_string(mpv, "video-rotate", "no"))
         checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
         checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
         configureBundledSubtitleFont()
         configureShaderCache()
         checkError(mpv_set_option_string(mpv, "keep-open", "yes"))
-        checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
         checkError(mpv_set_option_string(mpv, "tone-mapping", "auto"))
         checkError(mpv_set_option_string(mpv, "hdr-compute-peak", "yes"))
         applyDemuxerCacheLimits()
         applyLowMemoryDeviceProfile()
 
         checkError(mpv_initialize(mpv))
+        if !videoView.attach(to: mpv) {
+            print("[MPV] Video output unavailable: the OpenGL ES render context could not be created")
+        }
         applyAudioLanguagePreferences(preferredAudioLanguages)
 
         // Observe properties
@@ -697,7 +678,7 @@ final class MPVPlayerViewController: UIViewController {
     }
 
     /// Persist compiled GPU shaders and ICC profiles across launches (Android sets the same
-    /// directories) so the Vulkan pipeline does not recompile every shader on each playback.
+    /// directories) so ICC profiles are not recomputed on each playback.
     private func configureShaderCache() {
         guard let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
             return
@@ -709,9 +690,7 @@ final class MPVPlayerViewController: UIViewController {
             print("[MPV] Failed to create shader cache directory: \(error)")
             return
         }
-        checkError(mpv_set_option_string(mpv, "gpu-shader-cache", "yes"))
         cacheURL.path.withCString { path in
-            checkError(mpv_set_option_string(mpv, "gpu-shader-cache-dir", path))
             checkError(mpv_set_option_string(mpv, "icc-cache-dir", path))
         }
     }
@@ -773,7 +752,7 @@ final class MPVPlayerViewController: UIViewController {
     private func attemptStartPendingLoad() {
         guard let request = pendingLoadRequest else { return }
         guard mpv != nil else { return }
-        layoutMetalLayer()
+        layoutVideoSurface()
         guard isViewportReadyForPlayback(queuedAtUptime: request.queuedAtUptime) else {
             schedulePendingLoadRetry()
             return
@@ -787,7 +766,7 @@ final class MPVPlayerViewController: UIViewController {
 
     private func startLoad(_ request: PendingLoadRequest) {
         guard mpv != nil else { return }
-        layoutMetalLayer()
+        layoutVideoSurface()
         clearPlaybackError()
         let sanitizedHeaders = sanitizeRequestHeaders(request.requestHeaders)
         activeRequestHeaders = sanitizedHeaders
@@ -899,15 +878,9 @@ final class MPVPlayerViewController: UIViewController {
         saturation: Int,
         gamma: Int
     ) {
-        if #available(iOS 16.0, *) {
-            if metalLayer.wantsExtendedDynamicRangeContent != extendedDynamicRange {
-                metalLayer.wantsExtendedDynamicRangeContent = extendedDynamicRange
-            }
-        }
         guard mpv != nil else { return }
 
         setStringPropertyIfChanged("hwdec", hardwareDecoder)
-        setStringPropertyIfChanged("target-colorspace-hint", targetColorspaceHint ? "yes" : "no")
         setStringPropertyIfChanged("tone-mapping", toneMapping)
         let isLowMemory = Self.isLowMemoryDevice
         setStringPropertyIfChanged("hdr-compute-peak", hdrComputePeak && !isLowMemory ? "yes" : "no")
@@ -1184,9 +1157,12 @@ final class MPVPlayerViewController: UIViewController {
         // Every use of the handle on this object stops with the line above (all helpers guard on
         // `mpv`). mpv_terminate_destroy blocks until the core and VO threads are down, so run it
         // off the main thread. mpv still holds unretained pointers to this controller (wakeup
-        // callback context) and its metal layer (`wid`), so keep `self` alive until it returns
+        // callback context) and its video view (render context), so keep `self` alive until it returns
         // and release it on the main thread (UIKit objects must not deinit elsewhere).
+        let surface = videoView
         DispatchQueue.global(qos: .utility).async {
+            // The render context must be freed before the core is destroyed.
+            surface.shutdown()
             mpv_terminate_destroy(ctx)
             DispatchQueue.main.async { withExtendedLifetime(self) {} }
         }

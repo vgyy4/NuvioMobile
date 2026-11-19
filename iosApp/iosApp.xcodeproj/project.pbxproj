@@ -282,7 +282,7 @@
 			mainGroup = 4BD16EE0A246E7EC8E40D563;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */,
+				F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../ios12/MPVKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AD93033A33973C81BB77B73A /* Products */;
@@ -735,16 +735,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */ = {
+		F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../ios12/MPVKit" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = ../MPVKit;
+			relativePath = ../ios12/MPVKit;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* MPVKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */;
+			package = F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../ios12/MPVKit" */;
 			productName = MPVKit;
 		};
 /* End XCSwiftPackageProductDependency section */

@@ -38,15 +38,15 @@ jobs:
 
       # `submodules: recursive` fails upstream: the tree has an orphan
       # `libass-android` gitlink with no .gitmodules entry (Android-only).
-      # iOS only needs MPVKit, so initialise that one recursively.
+      # MPVKit is only used for its build scripts and mpv patches: the prebuilt MPVKit libraries
+      # target iOS 14+ and render through MoltenVK (Vulkan, iOS 15+), so ios12/build-mpv-ios12.sh
+      # builds an OpenGL ES libmpv for iOS 12 instead.
       - name: Initialise MPVKit submodule
+        id: mpvkit
         working-directory: NuvioMobile
         run: |
-          git submodule update --init --recursive MPVKit
-          # MPVKit declares iOS 14 as its platform floor; its binaries load on older systems as long
-          # as the symbols they use exist, so let SwiftPM accept the iOS 12 target.
-          sed -i '' 's/\.iOS(\.v14)/.iOS(.v12)/' MPVKit/Package.swift
-          grep -n "platforms" MPVKit/Package.swift
+          git submodule update --init MPVKit
+          echo "sha=$(git -C MPVKit rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Lower the Kotlin/Native iOS floor
         working-directory: NuvioMobile
@@ -110,6 +110,54 @@ jobs:
         with:
           path: nuvio-engine/platform/apple/NuvioEngine.xcframework
           key: engine-xcframework-${{ runner.os }}-${{ runner.arch }}-${{ steps.engine-rev.outputs.sha }}
+
+      - name: Restore iOS 12 libmpv
+        id: mpv-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mpv-ios12/Libmpv.xcframework
+          key: mpv-ios12-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/ios12/build-mpv-ios12.sh') }}-${{ steps.mpvkit.outputs.sha }}
+
+      # The per-library progress (prefix, .done markers) is cached as well so a failure in one of the
+      # late libraries does not rebuild OpenSSL and FFmpeg on the next run.
+      - name: Restore libmpv build progress
+        id: mpv-work-cache
+        if: steps.mpv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mpv-ios12/work/prefix
+          key: mpv-ios12-work-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/ios12/build-mpv-ios12.sh') }}-${{ steps.mpvkit.outputs.sha }}
+
+      - name: Build libmpv for iOS 12.0 (OpenGL ES)
+        if: steps.mpv-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          brew install meson ninja pkgconf
+          mkdir -p "${RUNNER_TEMP}/mpv-ios12"
+          NuvioMobile/ios12/build-mpv-ios12.sh \
+            "${RUNNER_TEMP}/mpv-ios12/work" \
+            "${GITHUB_WORKSPACE}/NuvioMobile/MPVKit" \
+            "${RUNNER_TEMP}/mpv-ios12/Libmpv.xcframework"
+
+      - name: Save libmpv build progress
+        if: failure() && steps.mpv-cache.outputs.cache-hit != 'true' && steps.mpv-work-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/mpv-ios12/work/prefix
+          key: mpv-ios12-work-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/ios12/build-mpv-ios12.sh') }}-${{ steps.mpvkit.outputs.sha }}
+
+      - name: Save iOS 12 libmpv
+        if: steps.mpv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/mpv-ios12/Libmpv.xcframework
+          key: mpv-ios12-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('NuvioMobile/ios12/build-mpv-ios12.sh') }}-${{ steps.mpvkit.outputs.sha }}
+
+      - name: Install iOS 12 libmpv into the local MPVKit package
+        run: |
+          rm -rf NuvioMobile/ios12/MPVKit/Libmpv.xcframework
+          cp -R "${RUNNER_TEMP}/mpv-ios12/Libmpv.xcframework" NuvioMobile/ios12/MPVKit/Libmpv.xcframework
+          ls NuvioMobile/ios12/MPVKit/Libmpv.xcframework
 
       - name: Set up Java
         uses: actions/setup-java@v4
