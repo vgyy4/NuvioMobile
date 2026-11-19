@@ -334,7 +334,7 @@ build_mpv() {
 
 package_xcframework() {
     local merged=$work/libmpv-all.a
-    local libs=(libmpv libavcodec libavformat libavfilter libavutil libswresample libswscale
+    local libs=(libmpv libavdevice libavcodec libavformat libavfilter libavutil libswresample libswscale
         libass libfreetype libfribidi libharfbuzz libunibreak liblcms2 libplacebo libssl libcrypto)
     local files=()
     for lib in "${libs[@]}"; do
