@@ -55,11 +55,20 @@ final class PlayerAudioSessionController: NSObject, CXCallObserverDelegate {
         let mixing = hasCall ?? callObserver.calls.contains { !$0.hasEnded }
         let options: AVAudioSession.CategoryOptions = mixing ? [.mixWithOthers] : []
         // Declare video so iOS does not present playback as music; long-form policies cannot mix.
-        let policy: AVAudioSession.RouteSharingPolicy = mixing ? .default : .longFormVideo
+        // Route sharing policies exist from iOS 13; iOS 12 uses the plain category.
+        var policy: AVAudioSession.RouteSharingPolicy = .default
+        if #available(iOS 13.0, *) {
+            policy = mixing ? .default : .longFormVideo
+        }
         do {
-            if session.category != .playback || session.mode != .moviePlayback ||
-                session.categoryOptions != options || session.routeSharingPolicy != policy {
-                try session.setCategory(.playback, mode: .moviePlayback, policy: policy, options: options)
+            if #available(iOS 13.0, *) {
+                if session.category != .playback || session.mode != .moviePlayback ||
+                    session.categoryOptions != options || session.routeSharingPolicy != policy {
+                    try session.setCategory(.playback, mode: .moviePlayback, policy: policy, options: options)
+                }
+            } else if session.category != .playback || session.mode != .moviePlayback ||
+                        session.categoryOptions != options {
+                try session.setCategory(.playback, mode: .moviePlayback, options: options)
             }
             try session.setActive(true)
             onConfigurationChanged?()

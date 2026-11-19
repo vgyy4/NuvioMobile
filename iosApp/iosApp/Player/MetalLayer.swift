@@ -4,7 +4,13 @@ import CoreVideo
 import Metal
 
 class MetalLayer: CAMetalLayer {
-    weak var pictureInPictureSink: PlayerPictureInPictureController?
+    // The picture in picture sink needs iOS 15 (the type only exists there); older systems have none.
+    private weak var pictureInPictureSinkStorage: AnyObject?
+    @available(iOS 15.0, *)
+    var pictureInPictureSink: PlayerPictureInPictureController? {
+        get { pictureInPictureSinkStorage as? PlayerPictureInPictureController }
+        set { pictureInPictureSinkStorage = newValue }
+    }
     private let pictureInPictureLock = NSLock()
     private var consumesVideo = false
     private var presentationGeneration: UInt = 0
@@ -68,7 +74,9 @@ class MetalLayer: CAMetalLayer {
     }
 
     @objc func nuvioEnqueuePiPFrame(_ pixelBuffer: CVPixelBuffer, presentationTime: Double, isPictureInPictureFrame: Bool) {
-        pictureInPictureSink?.submit(pixelBuffer, pts: presentationTime, isPictureInPictureFrame: isPictureInPictureFrame)
+        if #available(iOS 15.0, *) {
+            pictureInPictureSink?.submit(pixelBuffer, pts: presentationTime, isPictureInPictureFrame: isPictureInPictureFrame)
+        }
     }
 
     override var drawableSize: CGSize {
