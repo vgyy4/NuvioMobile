@@ -636,7 +636,7 @@ final class MPVPlayerViewController: UIViewController {
         applyLowMemoryDeviceProfile()
 
         checkError(mpv_initialize(mpv))
-        if !videoView.attach(to: mpv) {
+        if let core = mpv, !videoView.attach(to: core) {
             print("[MPV] Video output unavailable: the OpenGL ES render context could not be created")
         }
         applyAudioLanguagePreferences(preferredAudioLanguages)
