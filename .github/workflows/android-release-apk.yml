@@ -66,12 +66,16 @@ jobs:
           ' >> local.properties
           fi
 
+          # Only the signing properties are a real Gradle requirement (an incomplete
+          # signingConfig breaks the build). Everything else this build reads from
+          # local.properties (Trakt, TMDB, Simkl, ...) has an empty-string fallback in
+          # composeApp/build.gradle.kts, so it's missing-but-fine here, not a reason to
+          # refuse the build. That stricter bar belongs to the official release
+          # pipeline (android-release.yml), not this one.
           required_properties=(
             NUVIO_RELEASE_STORE_PASSWORD
             NUVIO_RELEASE_KEY_ALIAS
             NUVIO_RELEASE_KEY_PASSWORD
-            TRAKT_CLIENT_ID
-            TRAKT_CLIENT_SECRET
           )
           for property_name in "${required_properties[@]}"; do
             if ! grep -Eq "^${property_name}=.+" local.properties; then
