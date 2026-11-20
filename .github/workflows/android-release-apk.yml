@@ -1,0 +1,92 @@
+name: Android Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ccr-9ba47f5b-ox81vl
+      - ci-ios-build
+    # Pushes that only change the UI recording workflow/scripts need no Android build.
+    paths-ignore:
+      - .github/recording/**
+      - .github/workflows/ui-recordings.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build full release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.NUVIO_RELEASE_KEYSTORE_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # An end-user build must be signed with the real release keystore (unlike the old
+      # debug workflow, which relied on Android's auto-generated debug key), so both
+      # secrets below are required rather than optional.
+      - name: Configure release properties
+        run: |
+          if [[ -z "${RELEASE_PROPERTIES_BASE64}" || -z "${RELEASE_KEYSTORE_BASE64}" ]]; then
+            echo "NUVIO_LOCAL_PROPERTIES_BASE64 and NUVIO_RELEASE_KEYSTORE_BASE64 must both be set to build a signed release APK." >&2
+            exit 1
+          fi
+
+          keystore_path="${RUNNER_TEMP}/nuvio-release.jks"
+          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
+          printf '%s' "${RELEASE_PROPERTIES_BASE64}" | base64 --decode > local.properties
+
+          sed -i -E '/^[[:space:]]*(sdk\.dir|NUVIO_RELEASE_STORE_FILE)[[:space:]]*=/d' local.properties
+          printf '\nNUVIO_RELEASE_STORE_FILE=%s\n' "${keystore_path}" >> local.properties
+
+          if ! grep -Eq '^NUVIO_SUPABASE_ANON_KEY=.+' local.properties; then
+            curl -fsS --retry 3 https://api.nuvio.tv/.well-known/nuvio | python3 -c '
+          import sys, json
+          d = json.load(sys.stdin)
+          print("NUVIO_SUPABASE_URL=" + d["backend_url"])
+          print("NUVIO_SUPABASE_ANON_KEY=" + d["publishable_key"])
+          print("NUVIO_SUPABASE_FALLBACK_URL=https://api-two.nuvioapp.space")
+          ' >> local.properties
+          fi
+
+          required_properties=(
+            NUVIO_RELEASE_STORE_PASSWORD
+            NUVIO_RELEASE_KEY_ALIAS
+            NUVIO_RELEASE_KEY_PASSWORD
+            TRAKT_CLIENT_ID
+            TRAKT_CLIENT_SECRET
+          )
+          for property_name in "${required_properties[@]}"; do
+            if ! grep -Eq "^${property_name}=.+" local.properties; then
+              echo "Missing required property: ${property_name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build fullRelease APK
+        run: ./gradlew :androidApp:assembleFullRelease -Pnuvio.android.distribution=full --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-release-apk
+          path: androidApp/build/outputs/apk/full/release/*.apk
+          if-no-files-found: error
+          retention-days: 7
