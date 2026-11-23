@@ -192,3 +192,14 @@ jobs:
           path: androidApp/build/outputs/apk/full/release/*.apk
           if-no-files-found: error
           retention-days: 7
+
+      # Release builds are minified, so a crash log only has obfuscated class/method
+      # names (tk5.h, vg4.d, ...). Without this, that's permanently undecodable the
+      # moment the runner that built it is gone - there's no other copy of the mapping.
+      - name: Upload R8 mapping file
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-release-mapping
+          path: androidApp/build/outputs/mapping/fullRelease/mapping.txt
+          if-no-files-found: warn
+          retention-days: 30
