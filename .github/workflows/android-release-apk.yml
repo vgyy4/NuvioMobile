@@ -84,6 +84,104 @@ jobs:
             fi
           done
 
+          echo "keystore_path=${keystore_path}" >> "${GITHUB_ENV}"
+
+      # Catches a wrong store/key password in ~2 seconds instead of after an hour of
+      # compiling, by actually signing a throwaway jar - the same operation Gradle's
+      # own signing step will do at the very end of the build.
+      - name: Verify the keystore actually signs
+        run: |
+          store_password="$(grep -E '^NUVIO_RELEASE_STORE_PASSWORD=' local.properties | cut -d= -f2-)"
+          key_alias="$(grep -E '^NUVIO_RELEASE_KEY_ALIAS=' local.properties | cut -d= -f2-)"
+          key_password="$(grep -E '^NUVIO_RELEASE_KEY_PASSWORD=' local.properties | cut -d= -f2-)"
+
+          if ! keytool -list -keystore "${keystore_path}" -storepass "${store_password}" -alias "${key_alias}" >/dev/null 2>&1; then
+            echo "::error::Keystore check failed: no alias '${key_alias}' in the keystore, or NUVIO_RELEASE_STORE_PASSWORD is wrong." >&2
+            exit 1
+          fi
+
+          test_dir="${RUNNER_TEMP}/keystore-check"
+          mkdir -p "${test_dir}"
+          : > "${test_dir}/probe.txt"
+          test_jar="${test_dir}/probe.jar"
+          jar cf "${test_jar}" -C "${test_dir}" probe.txt
+
+          if ! jarsigner -keystore "${keystore_path}" -storepass "${store_password}" -keypass "${key_password}" "${test_jar}" "${key_alias}" >/dev/null 2>&1; then
+            echo "::error::Keystore check failed: signing with alias '${key_alias}' did not work - NUVIO_RELEASE_KEY_PASSWORD is likely wrong (store password was fine)." >&2
+            exit 1
+          fi
+          rm -rf "${test_dir}"
+          echo "Keystore OK: alias '${key_alias}' signs successfully with the given passwords."
+
+      # Reports what every property this build can use actually resolves to - present,
+      # missing-but-optional, or present-but-malformed - so a gap shows up here instead
+      # of as a silently broken feature discovered later. Nothing in this step fails
+      # the build: only the signing properties checked above are hard requirements.
+      - name: Report optional config completeness
+        run: |
+          {
+            echo "## Runtime config completeness"
+            echo
+            echo "Required for signing (already verified above): NUVIO_RELEASE_STORE_PASSWORD, NUVIO_RELEASE_KEY_ALIAS, NUVIO_RELEASE_KEY_PASSWORD - OK"
+            echo
+            echo "| Property | Status |"
+            echo "|---|---|"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          report() {
+            local name="$1" pattern="${2:-}" label="${3:-}"
+            local value
+            value="$(grep -E "^${name}=" local.properties | head -1 | cut -d= -f2-)"
+            if [[ -z "${value}" ]]; then
+              echo "| ${name} | not set (${label:-optional feature disabled}) |" >> "${GITHUB_STEP_SUMMARY}"
+            elif [[ -n "${pattern}" && ! "${value}" =~ ${pattern} ]]; then
+              echo "| ${name} | ⚠️ set, but doesn't look like a valid value (unexpected format) |" >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "| ${name} | set |" >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          }
+
+          report TMDB_API_KEY '^[0-9a-f]{32}$' "no posters/metadata"
+          report NUVIO_SUPABASE_URL 'https?://.+' "cloud sync/login disabled"
+          report NUVIO_SUPABASE_ANON_KEY '^eyJ' "cloud sync/login disabled"
+          report TRAKT_CLIENT_ID '^[0-9a-f]{64}$' "Trakt sync disabled"
+          report TRAKT_CLIENT_SECRET '^[0-9a-f]{64}$' "Trakt sync disabled"
+          report SIMKL_CLIENT_ID '' "Simkl sync disabled"
+          report MDBLIST_CLIENT_ID '' "MDBList integration disabled"
+          report PREMIUMIZE_CLIENT_ID '' "Premiumize linking disabled"
+          report INTRODB_API_URL 'https?://.+' "skip-intro detection disabled"
+          report IMDB_RATINGS_API_BASE_URL 'https?://.+' "extra IMDb ratings source disabled"
+          report IMDB_TAPFRAME_API_BASE_URL 'https?://.+' "extra IMDb ratings source disabled"
+          report SENTRY_DSN 'https?://.+@.+' "crash reporting disabled"
+          report CONTRIBUTIONS_URL 'https?://.+' "cosmetic link, omitted"
+          report DONATIONS_DONATE_URL 'https?://.+' "cosmetic link, omitted"
+          report DONATIONS_BASE_URL 'https?://.+' "cosmetic link, omitted"
+
+          # TMDB and Trakt are cheap and safe to actually verify live (a single read-only
+          # request against each service's own API, using exactly the value configured
+          # here - not a guess, not several candidates tried in sequence).
+          tmdb_key="$(grep -E '^TMDB_API_KEY=' local.properties | head -1 | cut -d= -f2-)"
+          if [[ -n "${tmdb_key}" ]]; then
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://api.themoviedb.org/3/configuration?api_key=${tmdb_key}")"
+            if [[ "${code}" == "200" ]]; then
+              echo "- TMDB_API_KEY: verified live against TMDB's API (200)." >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "- ⚠️ TMDB_API_KEY: TMDB's API rejected it (HTTP ${code}) - the key is set but not actually valid." >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          fi
+
+          trakt_id="$(grep -E '^TRAKT_CLIENT_ID=' local.properties | head -1 | cut -d= -f2-)"
+          if [[ -n "${trakt_id}" ]]; then
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H 'Content-Type: application/json' -H 'trakt-api-version: 2' -H "trakt-api-key: ${trakt_id}" \
+              'https://api.trakt.tv/shows/popular?limit=1')"
+            if [[ "${code}" == "200" ]]; then
+              echo "- TRAKT_CLIENT_ID: verified live against Trakt's API (200)." >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "- ⚠️ TRAKT_CLIENT_ID: Trakt's API rejected it (HTTP ${code}) - the value is set but not a valid client ID." >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          fi
+
       - name: Build fullRelease APK
         run: ./gradlew :androidApp:assembleFullRelease -Pnuvio.android.distribution=full --stacktrace
 
