@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import co.touchlab.kermit.Logger
 import com.nuvio.app.core.storage.ProfileScopedKey
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -39,6 +40,7 @@ internal actual object SimklAuthStorage {
     private const val GCM_TAG_BITS = 128
 
     private var preferences: SharedPreferences? = null
+    private val log = Logger.withTag("SimklAuthStorage")
 
     fun initialize(context: Context) {
         preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -75,14 +77,19 @@ internal actual object SimklAuthStorage {
             .getOrNull()
     }
 
+    // Mirrors loadEncrypted()'s fail-safe behavior: a broken hardware-backed Keystore
+    // (common on some budget devices) must not crash the app on save - it should just
+    // not persist.
     private fun saveEncrypted(key: String, value: String?) {
         val scopedKey = ProfileScopedKey.of(key)
         val editor = preferences?.edit() ?: return
-        if (value.isNullOrBlank()) {
-            editor.remove(scopedKey).apply()
-        } else {
-            editor.putString(scopedKey, encrypt(value)).apply()
-        }
+        runCatching {
+            if (value.isNullOrBlank()) {
+                editor.remove(scopedKey).apply()
+            } else {
+                editor.putString(scopedKey, encrypt(value)).apply()
+            }
+        }.onFailure { e -> log.e(e) { "Unable to save encrypted value for '$key'" } }
     }
 
     private fun encrypt(value: String): String {

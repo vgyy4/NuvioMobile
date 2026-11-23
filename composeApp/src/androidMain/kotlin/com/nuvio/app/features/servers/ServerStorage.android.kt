@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import java.io.IOException
+import co.touchlab.kermit.Logger
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -16,6 +16,7 @@ internal actual object ServerStorage {
     private const val keyAlias = "com.nuvio.media.servers.credentials.v1"
     private lateinit var preferences: SharedPreferences
     private val lock = Any()
+    private val log = Logger.withTag("ServerStorage")
 
     fun initialize(context: Context) {
         preferences = context.applicationContext.getSharedPreferences("nuvio_servers", Context.MODE_PRIVATE)
@@ -37,24 +38,34 @@ internal actual object ServerStorage {
         }
     }
 
-    actual fun write(key: String, value: String?) = synchronized(lock) {
+    // Mirrors read()'s fail-safe behavior: a broken hardware-backed Keystore (common on
+    // some budget devices) must not crash the app on write - it should just not persist.
+    actual fun write(key: String, value: String?): Unit = synchronized(lock) {
         if (!::preferences.isInitialized) return@synchronized
-        val editor = preferences.edit()
-        if (value == null) {
-            editor.remove(key)
-        } else {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-            cipher.updateAAD("$keyAlias:$key".toByteArray(Charsets.UTF_8))
-            val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-            editor.putString(key, "${encode(cipher.iv)}.${encode(encrypted)}")
+        try {
+            val editor = preferences.edit()
+            if (value == null) {
+                editor.remove(key)
+            } else {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+                cipher.updateAAD("$keyAlias:$key".toByteArray(Charsets.UTF_8))
+                val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+                editor.putString(key, "${encode(cipher.iv)}.${encode(encrypted)}")
+            }
+            if (!editor.commit()) log.w { "Unable to save server credentials for '$key'" }
+        } catch (e: Exception) {
+            log.e(e) { "Unable to save server credentials for '$key'" }
         }
-        if (!editor.commit()) throw IOException("Unable to save server credentials")
     }
 
-    actual fun clear() = synchronized(lock) {
+    actual fun clear(): Unit = synchronized(lock) {
         if (!::preferences.isInitialized) return@synchronized
-        if (!preferences.edit().clear().commit()) throw IOException("Unable to clear server credentials")
+        try {
+            if (!preferences.edit().clear().commit()) log.w { "Unable to clear server credentials" }
+        } catch (e: Exception) {
+            log.e(e) { "Unable to clear server credentials" }
+        }
     }
 
     private fun secretKey(): SecretKey {

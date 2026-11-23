@@ -4,7 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import java.io.IOException
+import co.touchlab.kermit.Logger
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -14,6 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 internal actual object PlatformMdbListAuthPersistence : MdbListAuthPersistence {
     private const val keyAlias = "com.nuvio.media.mdblist.credentials.v1"
     private lateinit var preferences: android.content.SharedPreferences
+    private val log = Logger.withTag("MdbListAuthPersistence")
 
     fun initialize(context: Context) {
         preferences = context.applicationContext.getSharedPreferences("nuvio_mdblist_auth", Context.MODE_PRIVATE)
@@ -32,30 +33,42 @@ internal actual object PlatformMdbListAuthPersistence : MdbListAuthPersistence {
             cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, decode(parts[0])))
             cipher.updateAAD("$keyAlias:$key".toByteArray(Charsets.UTF_8))
             cipher.doFinal(decode(parts[1])).toString(Charsets.UTF_8)
-        } catch (_: Exception) {
-            if (!preferences.edit().remove(key).commit()) throw IOException("Unable to clear protected credentials")
+        } catch (e: Exception) {
+            log.w(e) { "Unable to decrypt protected credentials for '$key', clearing" }
+            runCatching { preferences.edit().remove(key).commit() }
             null
         }
     }
 
-    actual override fun write(profileId: Int, value: String?) = synchronized(lock) {
+    // Mirrors read()'s fail-safe behavior: a broken hardware-backed Keystore (common on
+    // some budget devices) must not crash the app on write - it should just not persist.
+    actual override fun write(profileId: Int, value: String?): Unit = synchronized(lock) {
+        if (!::preferences.isInitialized) return@synchronized
         val key = "profile.$profileId"
-        val editor = preferences.edit()
-        if (value == null) {
-            editor.remove(key)
-        } else {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-            cipher.updateAAD("$keyAlias:$key".toByteArray(Charsets.UTF_8))
-            val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-            editor.putString(key, "${encode(cipher.iv)}.${encode(encrypted)}")
+        try {
+            val editor = preferences.edit()
+            if (value == null) {
+                editor.remove(key)
+            } else {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+                cipher.updateAAD("$keyAlias:$key".toByteArray(Charsets.UTF_8))
+                val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+                editor.putString(key, "${encode(cipher.iv)}.${encode(encrypted)}")
+            }
+            if (!editor.commit()) log.w { "Unable to save protected credentials for '$key'" }
+        } catch (e: Exception) {
+            log.e(e) { "Unable to save protected credentials for '$key'" }
         }
-        if (!editor.commit()) throw IOException("Unable to save protected credentials")
     }
 
-    actual override fun clear() = synchronized(lock) {
+    actual override fun clear(): Unit = synchronized(lock) {
         if (!::preferences.isInitialized) return@synchronized
-        if (!preferences.edit().clear().commit()) throw IOException("Unable to clear protected credentials")
+        try {
+            if (!preferences.edit().clear().commit()) log.w { "Unable to clear protected credentials" }
+        } catch (e: Exception) {
+            log.e(e) { "Unable to clear protected credentials" }
+        }
     }
 
     private fun secretKey(): SecretKey {
