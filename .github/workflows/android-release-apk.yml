@@ -185,11 +185,37 @@ jobs:
       - name: Build fullRelease APK
         run: ./gradlew :androidApp:assembleFullRelease -Pnuvio.android.distribution=full --stacktrace
 
-      - name: Upload APK
+      # One artifact per ABI, so you can download just the one you need straight from the
+      # Actions UI instead of a zip bundling all four.
+      - name: Upload arm64-v8a APK
         uses: actions/upload-artifact@v4
         with:
-          name: nuvio-android-full-release-apk
-          path: androidApp/build/outputs/apk/full/release/*.apk
+          name: nuvio-android-full-release-apk-arm64-v8a
+          path: androidApp/build/outputs/apk/full/release/*-arm64-v8a-*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload armeabi-v7a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-release-apk-armeabi-v7a
+          path: androidApp/build/outputs/apk/full/release/*-armeabi-v7a-*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload x86 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-release-apk-x86
+          path: androidApp/build/outputs/apk/full/release/*-x86-*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload x86_64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-android-full-release-apk-x86_64
+          path: androidApp/build/outputs/apk/full/release/*-x86_64-*.apk
           if-no-files-found: error
           retention-days: 7
 
